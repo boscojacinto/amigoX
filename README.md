@@ -6,6 +6,8 @@ crochet the shape. It is a from-scratch Python implementation of the AmiGo
 research paper, wrapped in an interactive 3D web UI, an LLM agent that judges
 and repairs uncrochetable meshes, and a crochetability-aware mesh editor.
 
+![AmiGoX — pattern drawer alongside the 3D crochet graph (red row edges, blue column edges, stitch dots)](AmiGoX_Preview.png)
+
 ---
 
 ## 📄 The whitepaper
