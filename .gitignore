@@ -14,3 +14,8 @@ venv/
 
 # Generated outputs
 *.simplified.obj
+
+# Local sample meshes (not part of the repo)
+Heart.obj
+PolarBear.obj
+teddy.obj
