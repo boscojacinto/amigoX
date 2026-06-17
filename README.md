@@ -122,3 +122,20 @@ run_ui.py          launch the web UI
   manual loop-pick is the reliable fallback on messy or higher-genus meshes.
 - The browser editor's interactive tools (brush select, move gizmo, live preview)
   require a WebGL browser and a network connection (three.js loads from a CDN).
+
+### Branching shapes (join-as-you-go)
+
+Multi-limb shapes are crocheted as a body plus joined limbs (the pattern shows
+`— New limb: work N sc into the boundary —`). This works well at typical stitch
+widths, but two cases are imperfect:
+
+- **Peanut / strongly-concave cross-sections at very fine stitch widths.** If a
+  cross-section wraps two limbs in one concave loop that only separates near the
+  tips (e.g. a heart seeded from its bottom point), the limbs split into small
+  caps and a few long column edges remain at fine widths (~`w ≤ 0.02`). This is a
+  fundamental limit of row-by-row crochet on concave loops, not a tuning issue —
+  seed from a limb, use a coarser width, or reshape with the editor to avoid it.
+- **Open meshes with a thin seed band.** If the segment containing the seed is
+  too small to crochet, the pattern can start at a limb (no initial magic ring).
+  Make the mesh watertight first (the Phase-2 agent or the editor's *fill loop*
+  tool will do this).
