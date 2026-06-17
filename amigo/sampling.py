@@ -146,62 +146,62 @@ def _face_crossing_edges(face, crossings):
     return [e for e in edges if e in crossings]
 
 
+def _walk_loop(F, crossings, edge_faces, start_edge):
+    """Trace one connected isoline loop from start_edge. Returns (points, visited)."""
+    start_faces = edge_faces.get(start_edge, [])
+    if not start_faces:
+        return [crossings[start_edge]], {start_edge}
+    path = [crossings[start_edge]]
+    visited = {start_edge}
+    current_face_idx = start_faces[0]
+    for _ in range(len(crossings) + 1):
+        ce = _face_crossing_edges(F[current_face_idx], crossings)
+        next_edge = next((e for e in ce if e not in visited), None)
+        if next_edge is None:
+            break
+        path.append(crossings[next_edge])
+        visited.add(next_edge)
+        nb = [fi for fi in edge_faces.get(next_edge, []) if fi != current_face_idx]
+        if not nb:
+            break
+        current_face_idx = nb[0]
+    return path, visited
+
+
 def _trace_isoline(V, F, f, f_level, edge_faces, seam_edge_set, axis):
     """
-    Trace the isoline at f = f_level, starting from the seam crossing,
-    face by face, returning an ordered list of 3-D points.
+    Trace the isoline at f = f_level as a single connected loop.
+
+    An f-level can cross several disconnected loops (e.g. two limbs of one
+    segment). Tracing one loop and then appending the other loops' points in
+    arbitrary order produces a self-crossing "row" and a tangled column-edge
+    mess downstream. Instead we extract every connected loop and return a single
+    clean one — the loop the seam passes through (for consistency across rows),
+    or the largest loop if the seam does not cross this level.
     """
     crossings = _crossing_points(V, F, f, f_level, edge_faces)
     if not crossings:
         return []
 
-    # Find the seam crossing edge (or pick any if no seam edge crosses)
-    start_edge = None
-    for e in seam_edge_set:
-        if e in crossings:
-            start_edge = e
-            break
-    if start_edge is None:
-        start_edge = next(iter(crossings))
+    seam_starts = [e for e in seam_edge_set if e in crossings]
+    remaining = set(crossings)
+    loops = []  # (points, touches_seam)
+    while remaining:
+        start = next((e for e in seam_starts if e in remaining), None)
+        if start is None:
+            start = next(iter(remaining))
+        pts, visited = _walk_loop(F, crossings, edge_faces, start)
+        if not visited:
+            remaining.discard(start)
+            continue
+        loops.append((pts, bool(visited & seam_edge_set)))
+        remaining -= visited
 
-    # Find a face that contains start_edge
-    start_faces = edge_faces.get(start_edge, [])
-    if not start_faces:
-        return list(crossings.values())
-
-    path = [crossings[start_edge]]
-    visited_edges = {start_edge}
-    current_edge = start_edge
-    current_face_idx = start_faces[0]
-
-    for _ in range(len(crossings) + 1):
-        face = F[current_face_idx]
-        ce = _face_crossing_edges(face, crossings)
-        next_edge = None
-        for e in ce:
-            if e not in visited_edges:
-                next_edge = e
-                break
-
-        if next_edge is None:
-            break
-
-        path.append(crossings[next_edge])
-        visited_edges.add(next_edge)
-
-        # Move to the neighbouring face across next_edge
-        nb = [fi for fi in edge_faces.get(next_edge, []) if fi != current_face_idx]
-        if not nb:
-            break
-        current_face_idx = nb[0]
-        current_edge = next_edge
-
-    # If traversal missed some points (non-manifold / boundary) append the rest
-    for e, pt in crossings.items():
-        if e not in visited_edges:
-            path.append(pt)
-
-    return path
+    if not loops:
+        return []
+    seam_loops = [p for p, touches in loops if touches]
+    candidates = seam_loops if seam_loops else [p for p, _ in loops]
+    return max(candidates, key=len)
 
 
 # ---------------------------------------------------------------------------

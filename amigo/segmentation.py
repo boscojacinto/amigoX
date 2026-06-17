@@ -20,6 +20,37 @@ def detect_branching(f: np.ndarray, saddles: list[int]) -> bool:
     return len(saddles) > 0
 
 
+def _face_components(F, face_ids: np.ndarray) -> list[np.ndarray]:
+    """Split a set of faces into connected components (faces sharing an edge)."""
+    face_ids = np.asarray(face_ids)
+    if len(face_ids) <= 1:
+        return [face_ids]
+    # Map each undirected edge to the band-local faces touching it.
+    from collections import defaultdict
+    edge_faces = defaultdict(list)
+    for local, fi in enumerate(face_ids):
+        a, b, c = F[fi]
+        for u, v in ((a, b), (b, c), (c, a)):
+            edge_faces[(min(u, v), max(u, v))].append(local)
+    parent = list(range(len(face_ids)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for locals_on_edge in edge_faces.values():
+        for k in range(1, len(locals_on_edge)):
+            ra, rb = find(locals_on_edge[0]), find(locals_on_edge[k])
+            if ra != rb:
+                parent[ra] = rb
+    groups = defaultdict(list)
+    for local in range(len(face_ids)):
+        groups[find(local)].append(local)
+    return [face_ids[np.asarray(g)] for g in groups.values()]
+
+
 def segment_by_saddles(V, F, f: np.ndarray, saddles: list[int]):
     """
     Partition mesh faces into segments by slicing at saddle isolines.
@@ -42,32 +73,51 @@ def segment_by_saddles(V, F, f: np.ndarray, saddles: list[int]):
         'is_first'  : True if this is the initial (seed-side) segment
         'is_last'   : True if this is the terminal (tip) segment
     """
-    if not saddles:
-        # No branching — the whole mesh is one segment
-        f_vals_at_saddles = []
-    else:
-        f_vals_at_saddles = [float(f[s]) for s in saddles]
+    f_max = float(f.max())
+    # Merge saddles that sit at nearly the same f value — clustered saddles
+    # (common near a concave junction) otherwise create zero-width / razor-thin
+    # bands that shatter into sliver components.
+    eps = 0.05 * (f_max - float(f.min()))
+    f_vals_at_saddles = []
+    for fv in sorted(float(f[s]) for s in saddles):
+        if not f_vals_at_saddles or fv - f_vals_at_saddles[-1] > eps:
+            f_vals_at_saddles.append(fv)
 
     # f boundaries between segments
     f_lo_list = [0.0] + f_vals_at_saddles
-    f_hi_list = f_vals_at_saddles + [float(f.max())]
+    f_hi_list = f_vals_at_saddles + [f_max]
 
     # Face centroid f-values
     f_face = f[F].mean(axis=1)
 
+    # A band-component must be big enough to crochet; tinier ones are slivers
+    # from the banding and are skipped (their faces aren't crocheted separately).
+    min_faces = max(8, int(0.004 * len(F)))
+
     segments = []
+    n_bands = len(f_lo_list)
     for idx, (f_lo, f_hi) in enumerate(zip(f_lo_list, f_hi_list)):
         mask = (f_face >= f_lo) & (f_face <= f_hi)
         face_ids = np.where(mask)[0]
         if len(face_ids) == 0:
             continue
-        segments.append({
-            "faces": face_ids,
-            "f_lo": f_lo,
-            "f_hi": f_hi,
-            "is_first": idx == 0,
-            "is_last": idx == len(f_lo_list) - 1,
-        })
+        # A band above a saddle can contain several disconnected limbs; each is
+        # its own segment so every isoline is a single simple loop (otherwise the
+        # tracer mixes loops and the crochet graph tangles).
+        comps = _face_components(F, face_ids)
+        for comp in comps:
+            # Keep the band whole if it is a single component (don't drop a
+            # small but legitimate base/tip band); only filter slivers when a
+            # band actually fragments into several components.
+            if len(comp) == 0 or (len(comps) > 1 and len(comp) < min_faces):
+                continue
+            segments.append({
+                "faces": comp,
+                "f_lo": f_lo,
+                "f_hi": f_hi,
+                "is_first": idx == 0,
+                "is_last": idx == n_bands - 1,
+            })
 
     return segments
 
