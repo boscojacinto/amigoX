@@ -30,6 +30,8 @@ def sample_crochet_graph(
     f_max_idx: int,
     seed_idx: int,
     seam_vertices: list[int],
+    cap_seed: bool = True,
+    cap_tip: bool = True,
 ):
     """
     Sample crochet graph vertices for a single (possibly cut) mesh segment.
@@ -42,6 +44,10 @@ def sample_crochet_graph(
     f_max_idx     : vertex index of the isoline maximum
     seed_idx      : vertex index of the seed (first row)
     seam_vertices : ordered vertex list of the cut seam (seed → tip)
+    cap_seed      : start with the single seed point (a magic ring). False for a
+                    non-root segment that begins at a shared boundary loop.
+    cap_tip       : end with the single tip point. False for an internal segment
+                    whose top boundary loop hands off to child segments.
 
     Returns
     -------
@@ -68,9 +74,10 @@ def sample_crochet_graph(
     rows_pos: list[np.ndarray] = []
     row_f: list[float] = []
 
-    # Row 0: seed
-    rows_pos.append(V[seed_idx: seed_idx + 1].copy())
-    row_f.append(0.0)
+    # Row 0: seed (magic ring) — only when this segment starts at a pole.
+    if cap_seed:
+        rows_pos.append(V[seed_idx: seed_idx + 1].copy())
+        row_f.append(0.0)
 
     for i in range(1, n_rows):
         f_level = i * stitch_width
@@ -98,9 +105,11 @@ def sample_crochet_graph(
         rows_pos.append(sampled)
         row_f.append(f_level)
 
-    # Last row: tip
-    rows_pos.append(V[f_max_idx: f_max_idx + 1].copy())
-    row_f.append(f_max)
+    # Last row: tip — only when this segment closes to a pole (a leaf). An
+    # internal segment ends at its top boundary loop, handed to its children.
+    if cap_tip:
+        rows_pos.append(V[f_max_idx: f_max_idx + 1].copy())
+        row_f.append(f_max)
 
     return rows_pos, row_f
 

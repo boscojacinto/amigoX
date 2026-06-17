@@ -42,8 +42,7 @@ from .export_crochetparade import to_crochetparade
 from .segmentation import (
     segment_by_saddles,
     segment_meshes,
-    find_segment_boundaries,
-    topological_sort_segments,
+    build_segment_tree,
 )
 
 
@@ -63,8 +62,10 @@ def _stitch_types_per_vertex(rows_pos: list, all_instr: list) -> list[list[str]]
     for i, row in enumerate(rows_pos):
         n = len(row)
         if i == 0:
-            # Row 0 is the seed / magic-ring centre.
-            types.append(["magic"] * n)
+            # Row 0 is the magic-ring centre (root) or the inherited join loop.
+            kind = (all_instr[0][0].type
+                    if all_instr and all_instr[0] else "magic")
+            types.append([kind if kind in ("magic", "join") else "magic"] * n)
             continue
         row_types: list[str] = []
         for st in all_instr[i]:
@@ -81,6 +82,26 @@ def _stitch_types_per_vertex(rows_pos: list, all_instr: list) -> list[list[str]]
             row_types.extend(["sc"] * (n - len(row_types)))
         types.append(row_types[:n])
     return types
+
+
+def _align_loop(src: np.ndarray, ref: np.ndarray) -> np.ndarray:
+    """Roll/reverse loop ``src`` to best match ``ref`` (same loop, different
+    sampling) so the join coupling between them stays local."""
+    src = np.asarray(src, dtype=float)
+    if len(src) < 3 or len(ref) < 1:
+        return src
+
+    def aligned(a):
+        k = int(np.argmin(np.linalg.norm(a - ref[0], axis=1)))
+        return np.roll(a, -k, axis=0)
+
+    def cost(a):
+        m = min(len(a), len(ref))
+        return float(np.linalg.norm(a[:m] - ref[:m], axis=1).sum())
+
+    fwd = aligned(src)
+    rev = aligned(src[::-1].copy())
+    return fwd if cost(fwd) <= cost(rev) else rev
 
 
 def amigo_pipeline_data(
@@ -130,89 +151,101 @@ def amigo_pipeline_data(
         print(f"  max-f vertex = {f_max_idx},  saddle count = {len(saddles)}")
 
     # ------------------------------------------------------------------
-    # 3. Segment decomposition
+    # 3. Segment decomposition + parent/child tree (join-as-you-go)
     # ------------------------------------------------------------------
     segments = segment_by_saddles(V, F, f, saddles)
     seg_data = segment_meshes(V, F, segments)
-    boundaries = find_segment_boundaries(seg_data, V, F, f)
-    order = topological_sort_segments(seg_data)
+    parent, children, order = build_segment_tree(seg_data, seed_idx)
     if verbose:
         print(f"  {len(seg_data)} segment(s)")
 
     # ------------------------------------------------------------------
-    # 4. Per-segment processing
+    # 4a. Sample each segment's isoline rows (parents before children). A root
+    #     starts at a magic ring; an internal segment ends at its top boundary
+    #     loop; a leaf closes to a tip point.
     # ------------------------------------------------------------------
-    all_instructions = []
-    viz_segments = []
-
+    seg_rows: dict[int, list] = {}
     for seg_idx in order:
         seg = seg_data[seg_idx]
-        V_s = seg["V"]
-        F_s = seg["F"]
-        lv  = seg["local_verts"]
-        g2l = seg["global_to_local"]
+        V_s, F_s = seg["V"], seg["F"]
+        lv, g2l = seg["local_verts"], seg["global_to_local"]
         f_s = f[lv]
+        is_root = parent[seg_idx] < 0
+        is_leaf = len(children[seg_idx]) == 0
 
-        # Local seed index
-        if seg["is_first"]:
+        if is_root:
             local_seed = g2l.get(seed_idx, int(np.argmin(f_s)))
         else:
-            prev_bnd = boundaries[seg_idx - 1] if seg_idx > 0 else []
-            cands = [g2l[v] for v in prev_bnd if v in g2l]
-            local_seed = cands[0] if cands else int(np.argmin(f_s))
-
+            pv = set(int(v) for v in seg_data[parent[seg_idx]]["local_verts"])
+            shared = [g2l[int(v)] for v in lv if int(v) in pv]
+            local_seed = (min(shared, key=lambda l: f_s[l])
+                          if shared else int(np.argmin(f_s)))
         local_max = int(np.argmax(f_s))
 
-        # Seam: geodesic path from local seed to local tip
-        if verbose:
-            print(f"  Segment {seg_idx}: tracing seam …")
         try:
             seam_verts = geodesic_path(V_s, F_s, local_seed, local_max)
         except Exception:
             seam_verts = [local_seed, local_max]
 
-        if verbose:
-            print(f"  Segment {seg_idx}: sampling isoline grid …")
-
-        rows_pos, row_f = sample_crochet_graph(
-            V_s, F_s, f_s,
-            stitch_width=stitch_width,
-            f_max_idx=local_max,
-            seed_idx=local_seed,
-            seam_vertices=seam_verts,
+        rows_pos, _ = sample_crochet_graph(
+            V_s, F_s, f_s, stitch_width=stitch_width,
+            f_max_idx=local_max, seed_idx=local_seed, seam_vertices=seam_verts,
+            cap_seed=is_root, cap_tip=is_leaf,
         )
+        if len(rows_pos) >= 2:
+            seg_rows[seg_idx] = [np.asarray(r, dtype=float) for r in rows_pos]
 
-        if len(rows_pos) < 2:
-            if verbose:
-                print(f"  Segment {seg_idx}: too thin, skipping.")
+    # ------------------------------------------------------------------
+    # 4b. Join — prepend each child's portion of its parent's top boundary
+    #     loop (partitioned among siblings by nearest first row), so the child
+    #     is worked into the existing boundary, not a fresh magic ring.
+    # ------------------------------------------------------------------
+    for p in order:
+        if p not in seg_rows:
             continue
+        kids = [c for c in children[p] if c in seg_rows]
+        if not kids:
+            continue
+        boundary = seg_rows[p][-1]
+        if len(boundary) < 2:
+            continue
+        kid_firsts = [seg_rows[c][0] for c in kids]
+        assign = np.empty(len(boundary), dtype=int)
+        for bi, bp in enumerate(boundary):
+            assign[bi] = int(np.argmin(
+                [float(np.linalg.norm(kf - bp, axis=1).min()) for kf in kid_firsts]))
+        for ki, c in enumerate(kids):
+            idxs = np.where(assign == ki)[0]
+            if len(idxs) >= 2:
+                join_row = _align_loop(boundary[idxs], seg_rows[c][0])
+                seg_rows[c] = [join_row] + seg_rows[c]
 
+    # ------------------------------------------------------------------
+    # 4c. Connectivity, instructions and viz — in crochet (DFS) order.
+    # ------------------------------------------------------------------
+    all_instructions = []
+    viz_segments = []
+    for seg_idx in order:
+        rows_pos = seg_rows.get(seg_idx)
+        if not rows_pos or len(rows_pos) < 2:
+            continue
+        is_root = parent[seg_idx] < 0
+        _, col_edges = build_connectivity(rows_pos)
+        seg_instr = generate_all_instructions(rows_pos, col_edges,
+                                              magic_start=is_root)
         if verbose:
             counts = [len(r) for r in rows_pos]
             print(f"  Segment {seg_idx}: {len(rows_pos)} rows, "
-                  f"stitches/row: {min(counts)}–{max(counts)}")
+                  f"stitches/row: {min(counts)}–{max(counts)}"
+                  f"{'' if is_root else '  (joined)'}")
 
-        # Connectivity (DTW)
-        _, col_edges = build_connectivity(rows_pos)
-
-        # Stitch instructions
-        seg_instr = generate_all_instructions(rows_pos, col_edges)
-
-        # Capture the crochet graph for visualisation: 3-D stitch rows,
-        # per-vertex stitch types, and the column-edge coupling between
-        # consecutive rows (as [j, k] index pairs).
         viz_segments.append({
-            "is_first": bool(seg["is_first"]),
-            "rows": [np.asarray(r, dtype=float).tolist() for r in rows_pos],
+            "is_first": bool(is_root),
+            "rows": [r.tolist() for r in rows_pos],
             "types": _stitch_types_per_vertex(rows_pos, seg_instr),
             "col_edges": [[[int(j), int(k)] for (j, k) in edges]
                           for edges in col_edges],
         })
-
-        # For non-first segments skip the duplicated magic-circle row
-        if not seg["is_first"] and seg_instr:
-            seg_instr = seg_instr[1:]
-
         all_instructions.extend(seg_instr)
 
     if not all_instructions:

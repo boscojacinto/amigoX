@@ -38,16 +38,31 @@ def dtw_coupling(pos_a: np.ndarray, pos_b: np.ndarray):
     diff = pos_a[:, None, :] - pos_b[None, :, :]   # (n, m, 3)
     cost = np.sqrt(np.sum(diff ** 2, axis=2))       # (n, m)
 
+    # Sakoe–Chiba band: the rows are seam-aligned and similar length, so the
+    # correct coupling runs near the diagonal. Constraining DP to a band keeps
+    # the coupling local — without it, DTW takes long "shortcut" matches across
+    # concave loops (e.g. a heart's heart-shaped cross-section), which show up
+    # as tangled column edges.
+    band = max(abs(n - m) + 2, int(0.2 * max(n, m)))
+
+    def in_band(i, j):
+        center = i * (m - 1) / (n - 1) if n > 1 else 0
+        return abs(j - center) <= band
+
     # DP table
     dp = np.full((n, m), np.inf)
     dp[0, 0] = cost[0, 0]
 
     for i in range(1, n):
-        dp[i, 0] = dp[i - 1, 0] + cost[i, 0]
+        if in_band(i, 0):
+            dp[i, 0] = dp[i - 1, 0] + cost[i, 0]
     for j in range(1, m):
-        dp[0, j] = dp[0, j - 1] + cost[0, j]
+        if in_band(0, j):
+            dp[0, j] = dp[0, j - 1] + cost[0, j]
     for i in range(1, n):
         for j in range(1, m):
+            if not in_band(i, j):
+                continue
             dp[i, j] = cost[i, j] + min(dp[i - 1, j - 1],
                                          dp[i - 1, j],
                                          dp[i, j - 1])

@@ -51,6 +51,54 @@ def _face_components(F, face_ids: np.ndarray) -> list[np.ndarray]:
     return [face_ids[np.asarray(g)] for g in groups.values()]
 
 
+def _split_branches(F, f_face, faces, f_lo, f_hi, is_first, min_faces, depth=0):
+    """
+    Recursively split a segment where its cross-section bifurcates.
+
+    Saddle detection can miss the level at which a bulbous shape's limbs
+    actually separate (e.g. a heart's two lobes). Here we find the lowest
+    f-level above which the segment's faces form ≥2 connected components and
+    split there: a lower ring segment plus one child segment per limb. Each
+    child recurses, so nested branching is handled.
+    """
+    faces = np.asarray(faces)
+    # A real limb must be a substantial fraction of the segment, not a surface
+    # bump — this keeps the split count to genuine branches (e.g. a heart's two
+    # lobes) instead of shattering bulbous tips into many tiny segments.
+    branch_min = max(min_faces, int(0.15 * len(faces)))
+    if depth > 6 or len(faces) < 2 * branch_min:
+        return [{"faces": faces, "f_lo": f_lo, "f_hi": f_hi, "is_first": is_first}]
+
+    fb = f_face[faces]
+    split_L = None
+    for L in np.linspace(f_lo, f_hi, 40)[1:-1]:
+        upper = faces[fb >= L]
+        if len(upper) < 2 * branch_min:
+            break
+        comps = [c for c in _face_components(F, upper) if len(c) >= branch_min]
+        if len(comps) >= 2:
+            split_L = L
+            break
+
+    if split_L is None:
+        return [{"faces": faces, "f_lo": f_lo, "f_hi": f_hi, "is_first": is_first}]
+
+    lower = faces[fb < split_L]
+    upper_comps = [c for c in _face_components(F, faces[fb >= split_L])
+                   if len(c) >= min_faces]
+    out = []
+    if len(lower) >= min_faces:
+        out.append({"faces": lower, "f_lo": f_lo, "f_hi": split_L,
+                    "is_first": is_first})
+        child_first = False
+    else:
+        child_first = is_first  # no lower ring — children inherit root-ness
+    for c in upper_comps:
+        out.extend(_split_branches(F, f_face, c, split_L, f_hi, child_first,
+                                   min_faces, depth + 1))
+    return out
+
+
 def segment_by_saddles(V, F, f: np.ndarray, saddles: list[int]):
     """
     Partition mesh faces into segments by slicing at saddle isolines.
@@ -77,7 +125,7 @@ def segment_by_saddles(V, F, f: np.ndarray, saddles: list[int]):
     # Merge saddles that sit at nearly the same f value — clustered saddles
     # (common near a concave junction) otherwise create zero-width / razor-thin
     # bands that shatter into sliver components.
-    eps = 0.05 * (f_max - float(f.min()))
+    eps = 0.006 * (f_max - float(f.min()))
     f_vals_at_saddles = []
     for fv in sorted(float(f[s]) for s in saddles):
         if not f_vals_at_saddles or fv - f_vals_at_saddles[-1] > eps:
@@ -111,14 +159,14 @@ def segment_by_saddles(V, F, f: np.ndarray, saddles: list[int]):
             # band actually fragments into several components.
             if len(comp) == 0 or (len(comps) > 1 and len(comp) < min_faces):
                 continue
-            segments.append({
-                "faces": comp,
-                "f_lo": f_lo,
-                "f_hi": f_hi,
-                "is_first": idx == 0,
-                "is_last": idx == n_bands - 1,
-            })
+            # A component may still bifurcate higher up (bulbous limbs that the
+            # saddle pass missed) — split it where its cross-section divides.
+            segments.extend(_split_branches(
+                F, f_face, comp, f_lo, f_hi, idx == 0, min_faces))
 
+    # is_last: a segment with no higher-f segment sharing its boundary is a tip.
+    for s in segments:
+        s.setdefault("is_last", False)
     return segments
 
 
@@ -169,3 +217,52 @@ def topological_sort_segments(seg_data: list[dict]) -> list[int]:
     which corresponds to a valid topological sort of G_sigma).
     """
     return list(range(len(seg_data)))
+
+
+def build_segment_tree(seg_data: list[dict], seed_idx: int):
+    """
+    Build the parent/child tree of segments for join-as-you-go crocheting.
+
+    A segment's parent is the lower-f segment it shares the most boundary
+    vertices with (the saddle isoline between them). Roots have no parent.
+    Returns (parent, children, order) where ``order`` is a DFS preorder
+    (parents before children, each limb contiguous) starting at the segment
+    that contains the seed.
+    """
+    n = len(seg_data)
+    vsets = [set(int(v) for v in s["local_verts"]) for s in seg_data]
+    parent = [-1] * n
+    for t in range(n):
+        best, best_ov = -1, 0
+        for s in range(n):
+            if s == t or seg_data[s]["f_lo"] >= seg_data[t]["f_lo"]:
+                continue
+            ov = len(vsets[s] & vsets[t])
+            if ov > best_ov:
+                best, best_ov = s, ov
+        parent[t] = best
+
+    children = {i: [] for i in range(n)}
+    for t in range(n):
+        if parent[t] >= 0:
+            children[parent[t]].append(t)
+
+    seed_roots = [i for i in range(n) if parent[i] < 0 and seed_idx in vsets[i]]
+    other_roots = [i for i in range(n) if parent[i] < 0 and i not in seed_roots]
+
+    order, seen = [], set()
+
+    def dfs(u):
+        if u in seen:
+            return
+        seen.add(u)
+        order.append(u)
+        for c in sorted(children[u], key=lambda c: len(seg_data[c]["faces"]),
+                        reverse=True):
+            dfs(c)
+
+    for r in seed_roots + other_roots:
+        dfs(r)
+    for i in range(n):              # safety: any stragglers
+        dfs(i)
+    return parent, children, order

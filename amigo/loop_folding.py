@@ -42,6 +42,8 @@ def _row_total(stitches: list[Stitch]) -> int:
             total += 1
         elif s.type == "magic":
             total += s.x
+        elif s.type == "join":
+            total += s.x
     return total
 
 
@@ -157,6 +159,14 @@ def format_pattern(all_instructions: list[list[Stitch]]) -> str:
     display_row = 1
 
     while i < n:
+        # A join row starts a new limb worked into a shared boundary loop.
+        block0 = all_instructions[i]
+        if len(block0) == 1 and block0[0].type == "join":
+            lines.append("")
+            lines.append(f"— New limb: work {block0[0].x}sc into the boundary —")
+            i += 1
+            continue
+
         start = i
         j = i + 1
         while j < n and _rows_equal(all_instructions[i], all_instructions[j]):

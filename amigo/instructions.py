@@ -11,8 +11,9 @@ pointers in each row based on the coupling degree:
 This is a linear-time operation (Section 5.1 of the paper).
 
 A Stitch is a named tuple: (type, x)
-  type ∈ {'sc', 'inc', 'dec', 'magic'}
-  x    = multiplicity (x=1 for sc, x>1 for inc/dec)
+  type ∈ {'sc', 'inc', 'dec', 'magic', 'join'}
+  x    = multiplicity (x=1 for sc, x>1 for inc/dec; for magic/join, the number
+         of stitches in the ring / inherited boundary)
 """
 
 from __future__ import annotations
@@ -99,18 +100,24 @@ def generate_row_instructions(
     return stitches
 
 
-def generate_all_instructions(rows_pos: list, col_edges: list) -> list[list[Stitch]]:
+def generate_all_instructions(rows_pos: list, col_edges: list,
+                              magic_start: bool = True) -> list[list[Stitch]]:
     """
     Generate stitch sequences for all rows.
 
-    The first row is always the magic circle (or slip-stitch ring).
+    For a root segment the first row is a magic circle. For a child segment
+    (``magic_start=False``) the first row is a *join*: its stitches are worked
+    into the parent's shared boundary loop rather than a new magic ring.
     """
     all_rows: list[list[Stitch]] = []
     n_rows = len(rows_pos)
 
-    # Row 0: magic circle with as many sc as the first real row has vertices
-    n_first = len(rows_pos[1]) if n_rows > 1 else 1
-    all_rows.append([Stitch("magic", n_first)])
+    if magic_start:
+        n_first = len(rows_pos[1]) if n_rows > 1 else 1
+        all_rows.append([Stitch("magic", n_first)])
+    else:
+        # The join row "occupies" the inherited boundary stitches.
+        all_rows.append([Stitch("join", len(rows_pos[0]))])
 
     for i in range(n_rows - 1):
         n_curr = len(rows_pos[i])
