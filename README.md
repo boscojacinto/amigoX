@@ -1,6 +1,6 @@
-# AmiGo — 3D mesh → amigurumi crochet pattern
+# AmiGoX — 3D mesh → amigurumi crochet pattern
 
-AmiGo turns a closed 3D triangle mesh into a single-piece **amigurumi crochet
+AmiGoX turns a closed 3D triangle mesh into a single-piece **amigurumi crochet
 pattern** — the row-by-row `sc` / `inc` / `dec` instructions a person follows to
 crochet the shape. It is a from-scratch Python implementation of the AmiGo
 research paper, wrapped in an interactive 3D web UI, an LLM agent that judges

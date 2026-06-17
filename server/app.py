@@ -1,5 +1,5 @@
 """
-AmiGo web UI backend (FastAPI).
+AmiGoX web UI backend (FastAPI).
 
 Endpoints
 ---------
@@ -36,7 +36,7 @@ from amigo.mesh_ops import load_mesh, normalize_to_unit_area
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
 
-app = FastAPI(title="AmiGo")
+app = FastAPI(title="AmiGoX")
 
 
 @app.middleware("http")

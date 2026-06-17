@@ -60,7 +60,7 @@ def main():
     else:
         header = (
             "=" * 60 + "\n"
-            + "  AmiGo — Crochet Pattern\n"
+            + "  AmiGoX — Crochet Pattern\n"
             + "=" * 60
         )
         output = header + "\n\n" + pattern + "\n"

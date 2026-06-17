@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AmiGo — Crochetability assessment (Phase 2).
+AmiGoX — Crochetability assessment (Phase 2).
 
 Runs the Claude Opus 4.8 agent to judge whether a 3D mesh is crochetable by the
 AmiGo technique and, with your per-step approval, apply simplifications to make
@@ -24,7 +24,7 @@ import trimesh
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Assess mesh crochetability (AmiGo agent).")
+    ap = argparse.ArgumentParser(description="Assess mesh crochetability (AmiGoX agent).")
     ap.add_argument("mesh", help="Path to a triangle mesh (.obj, .ply, .stl, …)")
     ap.add_argument("--yes", action="store_true",
                     help="Auto-approve every proposed simplification.")
