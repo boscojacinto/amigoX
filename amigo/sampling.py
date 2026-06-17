@@ -63,6 +63,8 @@ def sample_crochet_graph(
     else:
         axis = np.array([0.0, 0.0, 1.0])
 
+    seam_pts = V[seam_vertices] if len(seam_vertices) else None
+
     rows_pos: list[np.ndarray] = []
     row_f: list[float] = []
 
@@ -88,6 +90,10 @@ def sample_crochet_graph(
         n_stitches = max(int(np.floor(total / stitch_width)), 1)
         sample_s = np.arange(n_stitches) * stitch_width
         sampled = _interp_arc(pts_arr, arc, sample_s)
+
+        # Consistent winding + a common start (the seam) so consecutive loops
+        # line up — otherwise DTW couples points across the loop (long edges).
+        sampled = _roll_to_seam(_orient_row(sampled, axis), seam_pts)
 
         rows_pos.append(sampled)
         row_f.append(f_level)
@@ -207,6 +213,25 @@ def _trace_isoline(V, F, f, f_level, edge_faces, seam_edge_set, axis):
 # ---------------------------------------------------------------------------
 # Arc-length helpers
 # ---------------------------------------------------------------------------
+
+def _orient_row(pts: np.ndarray, axis: np.ndarray) -> np.ndarray:
+    """Give a loop a consistent winding direction (positive around `axis`)."""
+    if len(pts) < 3:
+        return pts
+    center = pts.mean(axis=0)
+    rel = pts - center
+    signed = np.dot(np.cross(rel, np.roll(rel, -1, axis=0)).sum(axis=0), axis)
+    return pts[::-1].copy() if signed < 0 else pts
+
+
+def _roll_to_seam(pts: np.ndarray, seam_pts: np.ndarray | None) -> np.ndarray:
+    """Rotate a loop so its start is the sample nearest the seam (consistent
+    start point across rows ⇒ short, aligned DTW couplings)."""
+    if seam_pts is None or len(pts) < 3:
+        return pts
+    d = np.linalg.norm(pts[:, None, :] - seam_pts[None, :, :], axis=2).min(axis=1)
+    return np.roll(pts, -int(np.argmin(d)), axis=0)
+
 
 def _arc_lengths(pts: np.ndarray) -> np.ndarray:
     """Cumulative arc lengths along a polyline, shape (n,)."""
