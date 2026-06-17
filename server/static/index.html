@@ -30,7 +30,7 @@
     #sidebar header h1 span { color: var(--accent); }
     #sidebar header p { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
 
-    .controls { padding: 16px 20px; overflow-y: auto; flex: 0 0 auto; }
+    .controls { padding: 16px 20px; overflow-y: auto; flex: 0 1 auto; min-height: 0; }
     .row { margin-bottom: 16px; }
     label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
     input[type=file] { font-size: 12px; color: var(--muted); width: 100%; }
@@ -94,7 +94,7 @@
     .stats { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 4px; flex-wrap: wrap; }
     .stats b { color: var(--text); font-weight: 600; }
 
-    #pattern-wrap { flex: 1 1 auto; display: flex; flex-direction: column; border-top: 1px solid var(--border); min-height: 0; }
+    #pattern-wrap { flex: 1 1 auto; display: flex; flex-direction: column; border-top: 1px solid var(--border); min-height: 220px; }
     #pattern-wrap .ptitle { padding: 10px 20px; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
     #pattern { flex: 1; overflow-y: auto; margin: 0; padding: 0 20px 20px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; color: var(--text); }
     .copy-btn { width: auto; padding: 4px 10px; font-size: 11px; background: var(--panel-2); }
