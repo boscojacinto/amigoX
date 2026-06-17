@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets — never commit the Anthropic API key
+.env
+**/.env
+
+# Whitepaper (large binary, not source)
+2211.01178v1.pdf
+
+# Generated outputs
+*.simplified.obj

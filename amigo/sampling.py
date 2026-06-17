@@ -1,0 +1,227 @@
+"""
+Sample the crochet graph vertices by tracing isolines of f.
+
+For each row level f_i = i * w we:
+  1. Find all mesh-edge crossings of the isoline f = f_i.
+  2. Trace the isoline face-by-face, starting from the seam crossing,
+     to get an ordered sequence of crossing points.
+  3. Compute cumulative arc length along that ordered sequence.
+  4. Sample at equal arc-length intervals of w to get the crochet graph
+     vertices X_G for this row.
+
+The first row (f = 0) is the seed vertex.
+The last row  (f = f_max) is the vertex with maximum geodesic distance.
+
+Returns
+-------
+rows_pos : list of (n_i, 3) ndarrays — 3-D positions of graph vertices
+row_f    : list of floats           — f level for each row
+"""
+
+from __future__ import annotations
+
+import numpy as np
+from collections import defaultdict
+
+
+def sample_crochet_graph(
+    V, F, f: np.ndarray,
+    stitch_width: float,
+    f_max_idx: int,
+    seed_idx: int,
+    seam_vertices: list[int],
+):
+    """
+    Sample crochet graph vertices for a single (possibly cut) mesh segment.
+
+    Parameters
+    ----------
+    V, F          : mesh geometry
+    f             : geodesic distance values at vertices
+    stitch_width  : w — sampling interval
+    f_max_idx     : vertex index of the isoline maximum
+    seed_idx      : vertex index of the seed (first row)
+    seam_vertices : ordered vertex list of the cut seam (seed → tip)
+
+    Returns
+    -------
+    rows_pos : list of ndarray (n_i, 3)
+    row_f    : list of float
+    """
+    f_max = float(f[f_max_idx])
+    n_rows = max(int(np.floor(f_max / stitch_width)), 1)
+
+    # Pre-build adjacency structures once
+    edge_faces = _build_edge_face_map(F)
+    seam_edge_set = _seam_to_edge_set(seam_vertices)
+
+    # Pole-to-pole axis (fallback for angle-sort if traversal fails)
+    axis = V[f_max_idx] - V[seed_idx]
+    axis_len = np.linalg.norm(axis)
+    if axis_len > 1e-10:
+        axis = axis / axis_len
+    else:
+        axis = np.array([0.0, 0.0, 1.0])
+
+    rows_pos: list[np.ndarray] = []
+    row_f: list[float] = []
+
+    # Row 0: seed
+    rows_pos.append(V[seed_idx: seed_idx + 1].copy())
+    row_f.append(0.0)
+
+    for i in range(1, n_rows):
+        f_level = i * stitch_width
+        if f_level >= f_max:
+            break
+
+        pts = _trace_isoline(V, F, f, f_level, edge_faces, seam_edge_set, axis)
+        if len(pts) < 2:
+            continue
+
+        pts_arr = np.asarray(pts)
+        arc = _arc_lengths(pts_arr)
+        total = arc[-1]
+        if total < 1e-10:
+            continue
+
+        n_stitches = max(int(np.floor(total / stitch_width)), 1)
+        sample_s = np.arange(n_stitches) * stitch_width
+        sampled = _interp_arc(pts_arr, arc, sample_s)
+
+        rows_pos.append(sampled)
+        row_f.append(f_level)
+
+    # Last row: tip
+    rows_pos.append(V[f_max_idx: f_max_idx + 1].copy())
+    row_f.append(f_max)
+
+    return rows_pos, row_f
+
+
+# ---------------------------------------------------------------------------
+# Isoline tracing
+# ---------------------------------------------------------------------------
+
+def _build_edge_face_map(F):
+    """Map each undirected edge (u,v), u<v → list of incident face indices."""
+    ef: dict[tuple, list] = defaultdict(list)
+    for fi, face in enumerate(F):
+        for a, b in [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])]:
+            ef[(min(a, b), max(a, b))].append(fi)
+    return ef
+
+
+def _seam_to_edge_set(seam_vertices: list[int]) -> set[tuple]:
+    """Convert ordered seam vertex list to set of undirected edges."""
+    s = set()
+    for i in range(len(seam_vertices) - 1):
+        a, b = seam_vertices[i], seam_vertices[i + 1]
+        s.add((min(a, b), max(a, b)))
+    return s
+
+
+def _crossing_points(V, F_arr, f: np.ndarray, f_level: float, edge_faces):
+    """
+    Compute all edge crossing points for the isoline f = f_level.
+
+    Returns dict: (u, v) → 3-D crossing point  (u < v).
+    """
+    crossings: dict[tuple, np.ndarray] = {}
+    for (u, v) in edge_faces:
+        fu, fv = f[u], f[v]
+        if (fu < f_level < fv) or (fv < f_level < fu):
+            t = (f_level - fu) / (fv - fu)
+            crossings[(u, v)] = (1 - t) * V[u] + t * V[v]
+    return crossings
+
+
+def _face_crossing_edges(face, crossings):
+    """Return the (at most 2) crossing edges in a face."""
+    edges = [
+        (min(face[0], face[1]), max(face[0], face[1])),
+        (min(face[1], face[2]), max(face[1], face[2])),
+        (min(face[2], face[0]), max(face[2], face[0])),
+    ]
+    return [e for e in edges if e in crossings]
+
+
+def _trace_isoline(V, F, f, f_level, edge_faces, seam_edge_set, axis):
+    """
+    Trace the isoline at f = f_level, starting from the seam crossing,
+    face by face, returning an ordered list of 3-D points.
+    """
+    crossings = _crossing_points(V, F, f, f_level, edge_faces)
+    if not crossings:
+        return []
+
+    # Find the seam crossing edge (or pick any if no seam edge crosses)
+    start_edge = None
+    for e in seam_edge_set:
+        if e in crossings:
+            start_edge = e
+            break
+    if start_edge is None:
+        start_edge = next(iter(crossings))
+
+    # Find a face that contains start_edge
+    start_faces = edge_faces.get(start_edge, [])
+    if not start_faces:
+        return list(crossings.values())
+
+    path = [crossings[start_edge]]
+    visited_edges = {start_edge}
+    current_edge = start_edge
+    current_face_idx = start_faces[0]
+
+    for _ in range(len(crossings) + 1):
+        face = F[current_face_idx]
+        ce = _face_crossing_edges(face, crossings)
+        next_edge = None
+        for e in ce:
+            if e not in visited_edges:
+                next_edge = e
+                break
+
+        if next_edge is None:
+            break
+
+        path.append(crossings[next_edge])
+        visited_edges.add(next_edge)
+
+        # Move to the neighbouring face across next_edge
+        nb = [fi for fi in edge_faces.get(next_edge, []) if fi != current_face_idx]
+        if not nb:
+            break
+        current_face_idx = nb[0]
+        current_edge = next_edge
+
+    # If traversal missed some points (non-manifold / boundary) append the rest
+    for e, pt in crossings.items():
+        if e not in visited_edges:
+            path.append(pt)
+
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Arc-length helpers
+# ---------------------------------------------------------------------------
+
+def _arc_lengths(pts: np.ndarray) -> np.ndarray:
+    """Cumulative arc lengths along a polyline, shape (n,)."""
+    diffs = np.diff(pts, axis=0)
+    dists = np.linalg.norm(diffs, axis=1)
+    return np.concatenate([[0.0], np.cumsum(dists)])
+
+
+def _interp_arc(pts: np.ndarray, arc: np.ndarray, query_s: np.ndarray) -> np.ndarray:
+    """Linearly interpolate positions at query arc-length values."""
+    result = np.empty((len(query_s), 3))
+    for idx, s in enumerate(query_s):
+        j = np.searchsorted(arc, s, side="right") - 1
+        j = int(np.clip(j, 0, len(pts) - 2))
+        ds = arc[j + 1] - arc[j]
+        t = (s - arc[j]) / (ds + 1e-300)
+        result[idx] = (1 - t) * pts[j] + t * pts[j + 1]
+    return result

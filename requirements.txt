@@ -1,0 +1,11 @@
+numpy
+scipy
+trimesh
+potpourri3d
+robust-laplacian
+fastapi
+uvicorn[standard]
+python-multipart
+anthropic
+fast-simplification
+networkx

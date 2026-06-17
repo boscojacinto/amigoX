@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AmiGo — Crochet Pattern Designer</title>
+  <style>
+    :root {
+      --bg: #14161a;
+      --panel: #1c1f26;
+      --panel-2: #242833;
+      --accent: #ff5da2;
+      --accent-2: #51d1c8;
+      --text: #e6e8ec;
+      --muted: #8a92a3;
+      --border: #2c313c;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+    body { background: var(--bg); color: var(--text); overflow: hidden; }
+    #app { display: flex; height: 100vh; }
+
+    #sidebar {
+      width: 340px; min-width: 340px; height: 100%;
+      background: var(--panel); border-right: 1px solid var(--border);
+      display: flex; flex-direction: column;
+    }
+    #sidebar header { padding: 18px 20px 12px; border-bottom: 1px solid var(--border); }
+    #sidebar header h1 { margin: 0; font-size: 20px; letter-spacing: .5px; }
+    #sidebar header h1 span { color: var(--accent); }
+    #sidebar header p { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+
+    .controls { padding: 16px 20px; overflow-y: auto; flex: 0 0 auto; }
+    .row { margin-bottom: 16px; }
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
+    input[type=file] { font-size: 12px; color: var(--muted); width: 100%; }
+    input[type=range] { width: 100%; accent-color: var(--accent); }
+    .value { font-variant-numeric: tabular-nums; color: var(--text); font-size: 13px; }
+
+    button {
+      width: 100%; padding: 11px 14px; border: none; border-radius: 8px;
+      font-size: 14px; font-weight: 600; cursor: pointer; color: #fff;
+      background: var(--accent); transition: filter .15s;
+    }
+    button:hover:not(:disabled) { filter: brightness(1.1); }
+    button:disabled { opacity: .4; cursor: not-allowed; }
+    button.secondary { background: var(--accent-2); color: #06201e; }
+    button.tertiary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+    button.tertiary.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+    #editor-panel { position: absolute; top: 14px; right: 14px; width: 260px; max-height: calc(100% - 28px);
+      overflow-y: auto; background: rgba(20,22,26,.94); border: 1px solid var(--border); border-radius: 10px;
+      padding: 12px 14px; font-size: 12px; color: var(--text); }
+    #editor-panel .ep-sec { margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+    #editor-panel .ep-sec:last-child { border-bottom: none; margin-bottom: 0; }
+    #editor-panel b { display: block; margin-bottom: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+    #editor-panel label { display: block; font-size: 11px; color: var(--muted); margin: 6px 0; text-transform: none; letter-spacing: 0; }
+    #editor-panel input[type=range] { width: 100%; accent-color: var(--accent); }
+    #editor-panel .muted { color: var(--muted); }
+    .ep-row { display: flex; gap: 6px; flex-wrap: wrap; }
+    button.ep-mini { width: auto; padding: 6px 10px; font-size: 11px; font-weight: 600; background: var(--panel-2);
+      color: var(--text); border: 1px solid var(--border); border-radius: 6px; }
+    button.ep-mini:hover:not(:disabled) { background: var(--accent); color: #fff; }
+    button.ep-fix { display: block; width: 100%; margin-top: 6px; text-align: left; border-color: var(--accent); color: var(--accent); }
+    #ep-check { display: flex; flex-wrap: wrap; gap: 4px; }
+    .chip { padding: 2px 7px; border-radius: 5px; font-size: 11px; }
+    .chip.ok { background: #1d3a26; color: #5ec962; }
+    .chip.bad { background: #3a1d1d; color: #ff7d7d; }
+
+    #agent { flex: 1; overflow-y: auto; padding: 0 20px 20px; min-height: 0; }
+    #agent-log { font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.5; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+    #agent-log .tool { color: var(--accent-2); }
+    #agent-log .think { color: #6b7280; font-style: italic; }
+    #agent-log .applied { color: #5ec962; }
+    #agent-log .err { color: #ff5d5d; }
+    .card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; font-size: 12px; line-height: 1.5; }
+    .card h4 { margin: 0 0 6px; font-size: 13px; }
+    .card .muted { color: var(--muted); }
+    .verdict-badge { display: inline-block; padding: 3px 10px; border-radius: 6px; font-weight: 700; font-size: 12px; }
+    .v-yes { background: #1d3a26; color: #5ec962; }
+    .v-mod { background: #3a341d; color: #ffd24d; }
+    .v-no  { background: #3a1d1d; color: #ff7d7d; }
+    .card ul { margin: 6px 0 0; padding-left: 18px; }
+    .card .actions { display: flex; gap: 8px; margin-top: 10px; }
+    .card .actions button { width: auto; padding: 7px 14px; font-size: 13px; }
+    .btn-deny { background: var(--panel); border: 1px solid var(--border); color: var(--text); }
+
+    .seed-pill {
+      display: inline-block; padding: 3px 8px; border-radius: 6px;
+      background: var(--panel-2); font-size: 12px; font-variant-numeric: tabular-nums;
+    }
+    .hint { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.4; }
+
+    .stats { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 4px; flex-wrap: wrap; }
+    .stats b { color: var(--text); font-weight: 600; }
+
+    #pattern-wrap { flex: 1 1 auto; display: flex; flex-direction: column; border-top: 1px solid var(--border); min-height: 0; }
+    #pattern-wrap .ptitle { padding: 10px 20px; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
+    #pattern { flex: 1; overflow-y: auto; margin: 0; padding: 0 20px 20px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; color: var(--text); }
+    .copy-btn { width: auto; padding: 4px 10px; font-size: 11px; background: var(--panel-2); }
+
+    #viewport { flex: 1; position: relative; }
+    #canvas { display: block; width: 100%; height: 100%; }
+    #overlay { position: absolute; top: 14px; left: 14px; right: 14px; pointer-events: none; display: flex; justify-content: space-between; }
+    .badge { background: rgba(20,22,26,.8); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 12px; color: var(--muted); pointer-events: auto; }
+    .badge b { color: var(--text); }
+    #legend { display: none; align-items: center; gap: 8px; }
+    #stitch-legend { align-items: center; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--c); border: 1px solid rgba(255,255,255,.4); margin-right: 4px; vertical-align: middle; }
+    .bar { display: inline-block; width: 16px; height: 3px; border-radius: 2px; background: var(--c); margin-right: 4px; vertical-align: middle; }
+    .legend-bar { width: 120px; height: 10px; border-radius: 5px; background: linear-gradient(90deg,#440154,#3b528b,#21918c,#5ec962,#fde725); }
+    #status { position: absolute; bottom: 14px; left: 14px; font-size: 12px; color: var(--muted); background: rgba(20,22,26,.8); padding: 6px 12px; border-radius: 8px; }
+    .spinner { display: none; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <header>
+        <h1>Ami<span>Go</span></h1>
+        <p>3D mesh → amigurumi crochet pattern</p>
+      </header>
+      <div class="controls">
+        <div class="row">
+          <label>1 · Mesh file</label>
+          <input type="file" id="file" accept=".obj,.ply,.stl,.off" />
+          <div class="hint">Closed triangle mesh (.obj, .ply, .stl).</div>
+        </div>
+        <div class="row">
+          <label>2 · Seed vertex</label>
+          <span class="seed-pill" id="seed-pill">click the mesh to pick</span>
+          <div class="hint">Click a point on the mesh — crocheting starts here (the magic circle).</div>
+        </div>
+        <div class="row">
+          <label>3 · Stitch width — <span class="value" id="sw-val">0.050</span></label>
+          <input type="range" id="sw" min="0.02" max="0.12" step="0.005" value="0.05" />
+          <div class="hint">Smaller = more rows / finer pattern.</div>
+        </div>
+        <div class="row">
+          <button id="run" disabled>Generate pattern</button>
+        </div>
+        <div class="row">
+          <button id="assess" class="secondary" disabled>Assess crochetability ✨</button>
+          <div class="hint">Claude Opus 4.8 judges if this mesh is crochetable and proposes fixes (you approve each).</div>
+        </div>
+        <div class="row">
+          <button id="edit-toggle" class="tertiary" disabled>Edit mesh ✎</button>
+          <div class="hint">Repair the mesh in 3D — the checklist highlights problems and arms the matching tool.</div>
+        </div>
+      </div>
+      <div id="pattern-wrap">
+        <div class="ptitle"><span id="panel-title">Pattern</span><button class="copy-btn" id="copy" style="display:none">Copy</button></div>
+        <pre id="pattern">Upload a mesh, pick a seed, then generate.</pre>
+        <div id="agent" style="display:none;">
+          <div id="agent-verdict"></div>
+          <div id="agent-approve"></div>
+          <div id="agent-log"></div>
+        </div>
+      </div>
+    </aside>
+
+    <main id="viewport">
+      <canvas id="canvas"></canvas>
+      <div id="overlay">
+        <div class="badge" id="mesh-info">no mesh loaded</div>
+        <div style="display:flex; flex-direction:column; gap:8px; align-items:flex-end;">
+          <div class="badge" id="legend"><span>geodesic field</span><div class="legend-bar"></div></div>
+          <div class="badge" id="stitch-legend" style="display:none; gap:12px;">
+            <span><span class="bar" style="--c:#e6271f"></span>row edge</span>
+            <span><span class="bar" style="--c:#3b4bd8"></span>column edge</span>
+            <span><span class="dot" style="--c:#101216"></span>stitch</span>
+          </div>
+        </div>
+      </div>
+      <div id="status"></div>
+    </main>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+      "three-mesh-bvh": "https://unpkg.com/three-mesh-bvh@0.7.8/build/index.module.js"
+    }
+  }
+  </script>
+  <script type="module" src="/static/app.js?v=6"></script>
+</body>
+</html>
