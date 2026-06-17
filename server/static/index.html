@@ -30,7 +30,7 @@
     #sidebar header h1 span { color: var(--accent); }
     #sidebar header p { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
 
-    .controls { padding: 16px 20px; overflow-y: auto; flex: 0 1 auto; min-height: 0; }
+    .controls { padding: 16px 20px; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
     .row { margin-bottom: 16px; }
     label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
     input[type=file] { font-size: 12px; color: var(--muted); width: 100%; }
@@ -94,10 +94,22 @@
     .stats { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 4px; flex-wrap: wrap; }
     .stats b { color: var(--text); font-weight: 600; }
 
-    #pattern-wrap { flex: 1 1 auto; display: flex; flex-direction: column; border-top: 1px solid var(--border); min-height: 220px; }
-    #pattern-wrap .ptitle { padding: 10px 20px; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
-    #pattern { flex: 1; overflow-y: auto; margin: 0; padding: 0 20px 20px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; color: var(--text); }
-    .copy-btn { width: auto; padding: 4px 10px; font-size: 11px; background: var(--panel-2); }
+    /* Left slide-out drawer (pattern + agent), overlaying the 3D view */
+    #drawer { position: absolute; left: 0; top: 0; bottom: 0; width: 360px; max-width: 80%;
+      display: flex; flex-direction: column; background: var(--panel);
+      border-right: 1px solid var(--border); box-shadow: 4px 0 18px rgba(0,0,0,.35);
+      transform: translateX(-100%); transition: transform .25s ease; z-index: 20; }
+    #drawer.open { transform: translateX(0); }
+    #drawer-tab { position: absolute; right: -34px; top: 50%; transform: translateY(-50%);
+      width: 34px; padding: 14px 0; border: 1px solid var(--border); border-left: none;
+      border-radius: 0 8px 8px 0; background: var(--panel); color: var(--accent);
+      font-size: 13px; font-weight: 700; cursor: pointer; display: flex; align-items: center;
+      gap: 6px; writing-mode: vertical-rl; }
+    #drawer-tab span { writing-mode: vertical-rl; letter-spacing: 2px; font-size: 10px; color: var(--muted); }
+    #drawer.open #drawer-tab { color: var(--accent); }
+    .ptitle { padding: 12px 18px; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); }
+    #pattern { flex: 1; overflow-y: auto; margin: 0; padding: 14px 18px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; color: var(--text); }
+    .copy-btn { width: auto; padding: 4px 10px; font-size: 11px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; }
 
     #viewport { flex: 1; position: relative; }
     #canvas { display: block; width: 100%; height: 100%; }
@@ -148,19 +160,26 @@
           <div class="hint">Repair the mesh in 3D — the checklist highlights problems and arms the matching tool.</div>
         </div>
       </div>
-      <div id="pattern-wrap">
-        <div class="ptitle"><span id="panel-title">Pattern</span><button class="copy-btn" id="copy" style="display:none">Copy</button></div>
+    </aside>
+
+    <main id="viewport">
+      <canvas id="canvas"></canvas>
+      <aside id="drawer">
+        <button id="drawer-tab" title="Show / hide pattern">▸<span>PATTERN</span></button>
+        <div class="ptitle">
+          <span id="panel-title">Pattern</span>
+          <span style="display:flex; gap:8px; align-items:center;">
+            <button class="copy-btn" id="copy" style="display:none">Copy</button>
+            <button class="copy-btn" id="drawer-close">✕</button>
+          </span>
+        </div>
         <pre id="pattern">Upload a mesh, pick a seed, then generate.</pre>
         <div id="agent" style="display:none;">
           <div id="agent-verdict"></div>
           <div id="agent-approve"></div>
           <div id="agent-log"></div>
         </div>
-      </div>
-    </aside>
-
-    <main id="viewport">
-      <canvas id="canvas"></canvas>
+      </aside>
       <div id="overlay">
         <div class="badge" id="mesh-info">no mesh loaded</div>
         <div style="display:flex; flex-direction:column; gap:8px; align-items:flex-end;">
@@ -185,6 +204,6 @@
     }
   }
   </script>
-  <script type="module" src="/static/app.js?v=6"></script>
+  <script type="module" src="/static/app.js?v=7"></script>
 </body>
 </html>

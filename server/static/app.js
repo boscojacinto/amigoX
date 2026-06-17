@@ -30,6 +30,9 @@ const els = {
   seedPill: document.getElementById("seed-pill"),
   pattern: document.getElementById("pattern"),
   panelTitle: document.getElementById("panel-title"),
+  drawer: document.getElementById("drawer"),
+  drawerTab: document.getElementById("drawer-tab"),
+  drawerClose: document.getElementById("drawer-close"),
   agent: document.getElementById("agent"),
   agentLog: document.getElementById("agent-log"),
   agentApprove: document.getElementById("agent-approve"),
@@ -204,6 +207,15 @@ canvas.addEventListener("pointerup", (ev) => {
 // ----------------------------------------------------------------------------
 function setStatus(msg) { els.status.textContent = msg || ""; }
 
+// Left slide-out drawer holding the pattern / agent panel.
+function setDrawer(open) {
+  els.drawer.classList.toggle("open", open);
+  els.drawerTab.firstChild.nodeValue = open ? "◂" : "▸";
+}
+els.drawerTab.addEventListener("click", () =>
+  setDrawer(!els.drawer.classList.contains("open")));
+els.drawerClose.addEventListener("click", () => setDrawer(false));
+
 // Load a mesh payload (from /api/upload or an agent-produced simplified mesh)
 // into the viewer and reset the per-mesh UI state.
 function loadMeshPayload(data) {
@@ -269,6 +281,7 @@ els.run.addEventListener("click", async () => {
     renderResult(data);
     els.pattern.textContent = data.pattern;
     els.copy.style.display = "inline-block";
+    setDrawer(true);
     const nRows = data.segments.reduce((s, seg) => s + seg.rows.length, 0);
     setStatus(`Done — ${data.segments.length} segment(s), ${nRows} rows, ${state.lastStitchCount} stitches.`);
   } catch (e) {
@@ -337,6 +350,7 @@ els.assess.addEventListener("click", async () => {
   els.panelTitle.textContent = "Crochetability";
   els.pattern.style.display = "none";
   els.agent.style.display = "block";
+  setDrawer(true);
   els.agentLog.innerHTML = "";
   els.agentApprove.innerHTML = "";
   els.agentVerdict.innerHTML = "";
