@@ -60,17 +60,24 @@ the matching tool — fill a boundary loop, delete a stray piece, inflate a thin
 limb, smooth noise, or **cut a handle to reduce genus**. The agent can also
 propose precise edits you preview and approve.
 
-**Phase 4 — closed-loop seed optimization.** The seed vertex (the magic-ring
-start) strongly affects pattern quality, so the agent now **picks it for you**.
-A deterministic scorer (`quality.py`) rates each pattern for **surface coverage**
-(area no stitch represents) and **floating stitches** (column/row edges that span
-empty space across a concave/branching gap instead of hugging the surface). The
-agent lists candidate seeds (`seed_search.py` — principal pole + geodesic
-farthest points), evaluates a few, reasons about what's uncovered or floating,
-and iterates ~3–4 rounds to the best seed. Toggle **"Auto-pick seed"** in the web
-UI and *Generate* runs the optimizer instead of using a hand-picked seed (it
-overlays the culprits — red = uncovered, yellow = floating); untick it for the
-manual click-to-pick workflow. The CLI (`optimize.py`) shares the same agent core.
+**Phase 4 — closed-loop seed & stitch-width optimization.** The seed vertex (the
+magic-ring start) and the stitch width both strongly affect pattern quality, so
+the agent now **picks them for you**. A deterministic scorer (`quality.py`) rates
+each pattern for **surface coverage** (area no stitch represents), **floating
+stitches** (column/row edges that span empty space across a concave/branching gap
+instead of hugging the surface), and **thin segments** (features too narrow to
+crochet). `suggest_stitch_width()` sizes the stitch from the narrowest feature's
+girth so the thinnest part still gets enough stitches — only going finer than the
+default when a narrow feature demands it. The agent lists candidate seeds
+(`seed_search.py` — principal pole + geodesic farthest points), evaluates a few
+**(seed, width)** pairs, reasons about what's uncovered/floating/thin, and
+iterates to the best (e.g. a finer width to rescue a thin limb, a coarser one to
+shed floating stitches). Toggle **"Auto-pick seed & width"** in the web UI and
+*Generate* runs the optimizer (it adopts the chosen width and overlays the
+culprits — red = uncovered, yellow = floating); untick it for the manual
+click-to-pick workflow, where an **Auto** button beside the slider sizes the
+width to the current seed's narrowest feature. The CLI (`optimize.py`) shares the
+same agent core.
 
 ---
 
@@ -121,7 +128,7 @@ amigo/
   simplify.py      global repair transforms
   localize.py      localized problem detectors (incl. tree-cotree handle loops)
   edit.py          mesh-edit ops (fill_loop, inflate, cut_handle, …)
-  quality.py       pattern scorer — coverage + floating-stitch metrics
+  quality.py       pattern scorer — coverage + floating-stitch metrics; auto stitch width
   seed_search.py   seed candidate generation (pole + geodesic FPS) + ranking
   agent.py         the agent (claude-opus-4-8): assess + seed optimization
 server/

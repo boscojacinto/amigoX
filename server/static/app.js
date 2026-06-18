@@ -24,6 +24,7 @@ const els = {
   file: document.getElementById("file"),
   sw: document.getElementById("sw"),
   swVal: document.getElementById("sw-val"),
+  autoWidth: document.getElementById("auto-width"),
   run: document.getElementById("run"),
   assess: document.getElementById("assess"),
   autoSeed: document.getElementById("auto-seed"),
@@ -274,7 +275,7 @@ function refreshSeedMode() {
     els.seedPill.textContent =
       state.seed == null ? "auto (Claude picks)" : `auto → vertex #${state.seed}`;
     els.seedHint.textContent =
-      "Generate runs Claude's seed optimizer — it tries seeds and picks the best.";
+      "Generate runs Claude's optimizer — it picks the seed and stitch width.";
     els.run.textContent = "Generate (auto-seed) 🎯";
     els.run.disabled = !hasMesh;
   } else {
@@ -285,7 +286,40 @@ function refreshSeedMode() {
     els.run.textContent = "Generate pattern";
     els.run.disabled = !(hasMesh && state.seed != null);
   }
+  // Manual "Auto" width needs a chosen seed; in auto mode the optimizer does it.
+  els.autoWidth.disabled = auto || !(hasMesh && state.seed != null);
 }
+
+// Set the stitch-width slider + label (clamped to the slider's range).
+function setStitchWidth(w) {
+  const min = Number(els.sw.min), max = Number(els.sw.max);
+  const v = Math.max(min, Math.min(max, Number(w)));
+  els.sw.value = v;
+  els.swVal.textContent = Number(els.sw.value).toFixed(3);
+}
+
+els.autoWidth.addEventListener("click", async () => {
+  if (state.seed == null || !state.meshId) return;
+  els.autoWidth.disabled = true;
+  const prev = els.autoWidth.textContent;
+  els.autoWidth.textContent = "…";
+  try {
+    const res = await fetch("/api/suggest_width", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: state.meshId, seed: state.seed }),
+    });
+    const info = await res.json();
+    if (!res.ok || !info.ok) throw new Error(info.detail || info.reason || "no estimate");
+    setStitchWidth(info.stitch_width);
+    setStatus(`Auto width ${info.stitch_width} — narrowest feature girth `
+      + `${info.min_segment_girth}${info.limited_by_narrowness ? " (limited by a narrow feature)" : ""}.`);
+  } catch (e) {
+    setStatus("Auto width failed: " + e.message);
+  } finally {
+    els.autoWidth.textContent = prev;
+    els.autoWidth.disabled = false;
+  }
+});
 
 els.autoSeed.addEventListener("change", () => {
   if (els.autoSeed.checked && seedMarker) {
@@ -593,9 +627,9 @@ function startOptimizeStream(sid) {
       case "seed_eval": {
         const s = ev.summary || {};
         if (s.ran) {
-          logLine(`&nbsp;&nbsp;<span class="seed-score">seed ${esc(s.seed)} → score `
+          logLine(`&nbsp;&nbsp;<span class="seed-score">seed ${esc(s.seed)} @ w=${esc(s.stitch_width)} → score `
             + `<b>${esc(s.score)}</b>, coverage ${esc((s.coverage * 100).toFixed(1))}%, `
-            + `floating ${esc(s.n_floating)}, segments ${esc(s.n_segments)}</span>`, "applied");
+            + `floating ${esc(s.n_floating)}, thin ${esc(s.n_thin_segments)}</span>`, "applied");
         } else {
           logLine(`&nbsp;&nbsp;<span class="err">seed ${esc(s.seed)} → failed`
             + (s.error ? `: ${esc(s.error)}` : "") + `</span>`);
@@ -622,15 +656,17 @@ function startOptimizeStream(sid) {
   };
 }
 
-// Adopt the winning seed, generate its pattern, and overlay the culprits.
+// Adopt the winning seed + width, generate its pattern, and overlay the culprits.
 async function applySeedChoice(choice, metrics) {
   state.seed = Number(choice.seed);
-  setStatus(`Best seed #${state.seed} — generating its pattern…`);
+  const width = choice.stitch_width ? Number(choice.stitch_width) : Number(els.sw.value);
+  if (choice.stitch_width) setStitchWidth(width);   // reflect the chosen width
+  setStatus(`Best seed #${state.seed} @ width ${width} — generating its pattern…`);
   try {
     const res = await fetch("/api/run", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        id: state.meshId, seed: state.seed, stitch_width: Number(els.sw.value),
+        id: state.meshId, seed: state.seed, stitch_width: width,
       }),
     });
     if (!res.ok) throw new Error((await res.json()).detail || res.statusText);

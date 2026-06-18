@@ -264,6 +264,23 @@ def optimize_stream(sid: str):
                              headers={"X-Accel-Buffering": "no"})
 
 
+class SuggestWidthRequest(BaseModel):
+    id: str
+    seed: int
+
+
+@app.post("/api/suggest_width")
+async def suggest_width(req: SuggestWidthRequest):
+    """Deterministic stitch-width suggestion from the narrowest feature girth."""
+    mesh = _MESHES.get(req.id)
+    if mesh is None:
+        raise HTTPException(status_code=404, detail="Mesh not found — upload it first.")
+    from amigo.quality import suggest_stitch_width
+    if not (0 <= req.seed < len(mesh["V"])):
+        raise HTTPException(status_code=400, detail="Seed index out of range.")
+    return suggest_stitch_width(mesh["V"], mesh["F"], req.seed)
+
+
 # ----------------------------------------------------------------------------
 # Crochetability editor (Phase 3)
 # ----------------------------------------------------------------------------

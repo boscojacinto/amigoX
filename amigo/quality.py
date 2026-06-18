@@ -198,6 +198,76 @@ def evaluate_seed(V, F, seed_idx: int, stitch_width: float = 0.05) -> dict:
     return metrics
 
 
+def suggest_stitch_width(V, F, seed_idx: int, *,
+                         target_min_stitches: int = 5,
+                         preferred: float = 0.05,
+                         ref_width: float = 0.05,
+                         lo: float = 0.01, hi: float = 0.12) -> dict:
+    """
+    Estimate a stitch width from the narrowness of the mesh's features.
+
+    A row needs at least ~3 stitches to be crochetable, so on the narrowest
+    feature the stitch must be no larger than (feature girth) / target_min_stitches.
+    We trace the crochet rows once at a reference width — row circumferences are a
+    geometric property of the isolines, nearly independent of the sampling width —
+    and take each segment's *median* row girth (the median ignores the natural
+    taper to a point near caps/tips, so we measure the real limb thickness, not a
+    pole ramp). The narrowest segment then sets the width. Clamped to ``[lo, hi]``.
+
+    This is a heuristic *starting point*: a finer width helps thin features but can
+    add floating stitches on concave/branching cross-sections, so callers should
+    treat the result as a candidate and let the quality score arbitrate.
+
+    Returns ``{ok, stitch_width, min_segment_girth, target_min_stitches, ...}``.
+    """
+    Vn, _ = normalize_to_unit_area(np.asarray(V, dtype=float),
+                                   np.asarray(F, dtype=np.int64))
+    try:
+        data = amigo_pipeline_data(Vn, F, seed_idx=int(seed_idx),
+                                   stitch_width=ref_width, verbose=False)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "stitch_width": ref_width, "seed": int(seed_idx),
+                "error": f"{type(exc).__name__}: {exc}"}
+
+    girths = []  # one robust girth per segment
+    for seg in data["segments"]:
+        rows = seg["rows"]
+        interior = rows[1:-1] if len(rows) > 2 else rows
+        circs = []
+        for row in interior:
+            pts = np.asarray(row, dtype=float)
+            if len(pts) < 2:
+                continue
+            length = float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum()
+                           + np.linalg.norm(pts[0] - pts[-1]))  # close the loop
+            if length > 1e-9:
+                circs.append(length)
+        if circs:
+            girths.append(float(np.median(circs)))
+
+    if not girths:
+        return {"ok": False, "stitch_width": ref_width, "seed": int(seed_idx),
+                "reason": "no interior rows to measure"}
+
+    min_girth = float(min(girths))
+    narrowness_cap = min_girth / max(1, target_min_stitches)  # largest safe width
+    # Only go finer than the preferred default when a narrow feature forces it.
+    w = min(preferred, narrowness_cap)
+    w_clamped = max(lo, min(hi, w))
+    return {
+        "ok": True,
+        "stitch_width": round(w_clamped, 4),
+        "narrowness_cap": round(narrowness_cap, 4),
+        "preferred": preferred,
+        "min_segment_girth": round(min_girth, 4),
+        "target_min_stitches": int(target_min_stitches),
+        "ref_width": ref_width,
+        "n_segments_measured": len(girths),
+        "seed": int(seed_idx),
+        "limited_by_narrowness": narrowness_cap < preferred,
+    }
+
+
 def summarize_metrics(m: dict) -> dict:
     """Compact, array-free view of evaluate_seed output for the LLM agent."""
     if not m.get("ran", False):

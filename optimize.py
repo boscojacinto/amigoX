@@ -25,7 +25,8 @@ def main():
     ap = argparse.ArgumentParser(description="Optimize the crochet seed (AmiGoX).")
     ap.add_argument("mesh", help="Path to a triangle mesh (.obj, .ply, .stl, …)")
     ap.add_argument("--stitch-width", type=float, default=0.05,
-                    help="Stitch size relative to the normalised mesh (default 0.05).")
+                    help="Preferred/starting stitch size (default 0.05). The optimizer "
+                         "auto-picks a finer width if a narrow feature needs it.")
     ap.add_argument("--deterministic", action="store_true",
                     help="Skip the LLM; rank candidate seeds with the quality metric.")
     ap.add_argument("--out", default=None,
@@ -51,8 +52,10 @@ def main():
         sys.exit(1)
 
     seed = int(choice["seed"])
+    width = float(choice.get("stitch_width", args.stitch_width))
     print("\n" + "=" * 60)
-    print(f"  BEST SEED: {seed}   (score {choice.get('score', float('nan')):.4f})")
+    print(f"  BEST SEED: {seed}   STITCH WIDTH: {width:g}   "
+          f"(score {choice.get('score', float('nan')):.4f})")
     print("=" * 60)
     if "coverage" in choice:
         print(f"  coverage={choice['coverage']:.4f}  "
@@ -62,20 +65,27 @@ def main():
         print(f"  • {r}")
 
     pattern = amigo_pipeline(mesh_path=args.mesh, seed_idx=seed,
-                             stitch_width=args.stitch_width, verbose=False)
+                             stitch_width=width, verbose=False)
     out = args.out or (os.path.splitext(args.mesh)[0] + ".pattern.txt")
-    header = "=" * 60 + "\n  AmiGoX — Crochet Pattern (auto-seed)\n" + "=" * 60
+    header = "=" * 60 + "\n  AmiGoX — Crochet Pattern (auto-seed + auto-width)\n" + "=" * 60
     with open(out, "w") as fh:
         fh.write(header + "\n\n" + pattern + "\n")
     print(f"\nPattern written to {out}")
     print(f"  (regenerate any time:  python main.py {args.mesh} --seed {seed} "
-          f"--stitch-width {args.stitch_width})")
+          f"--stitch-width {width:g})")
 
 
-def _deterministic(V, F, stitch_width):
-    from amigo import rank_candidates
-    print("Ranking candidate seeds (deterministic)…")
-    ranked = rank_candidates(V, F, stitch_width=stitch_width)
+def _deterministic(V, F, preferred):
+    from amigo import rank_candidates, seed_candidates, suggest_stitch_width
+    # Auto stitch width from the narrowest feature (seeded at the principal pole).
+    pole = seed_candidates(V, F)[0]["seed"]
+    info = suggest_stitch_width(V, F, pole, preferred=preferred)
+    width = info.get("stitch_width", preferred) if info.get("ok") else preferred
+    print(f"Auto stitch width: {width:g}  "
+          f"(narrowness cap {info.get('narrowness_cap', '?')}, preferred {preferred:g}"
+          f"{', limited by a narrow feature' if info.get('limited_by_narrowness') else ''})")
+    print(f"Ranking candidate seeds (deterministic) at width {width:g}…")
+    ranked = rank_candidates(V, F, stitch_width=width)
     for m in ranked:
         tag = "ok " if m.get("ran") else "err"
         print(f"  [{tag}] seed {m.get('seed'):>6}  score={m.get('score', 0):.4f}"
@@ -83,8 +93,9 @@ def _deterministic(V, F, stitch_width):
     best = next((m for m in ranked if m.get("ran")), None)
     if best is None:
         return None
-    best.setdefault("reasons", [f"highest deterministic score among "
-                                f"{len(ranked)} candidates"])
+    best.setdefault("reasons", [
+        f"highest deterministic score among {len(ranked)} candidates",
+        f"stitch width {width:g} from narrowest-feature girth"])
     return best
 
 
@@ -103,9 +114,9 @@ def _agentic(V, F, stitch_width):
         elif t == "seed_eval":
             s = ev["summary"]
             if s.get("ran"):
-                print(f"      · seed {s['seed']}: score={s['score']} "
-                      f"coverage={s['coverage']} floating={s['n_floating']} "
-                      f"segments={s['n_segments']}")
+                print(f"      · seed {s['seed']} @ w={s.get('stitch_width')}: "
+                      f"score={s['score']} coverage={s['coverage']} "
+                      f"floating={s['n_floating']} thin={s['n_thin_segments']}")
             else:
                 print(f"      · seed {s.get('seed')}: failed ({s.get('error', '')})")
         elif t == "seed_choice":

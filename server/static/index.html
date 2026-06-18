@@ -145,14 +145,16 @@
         </div>
         <div class="row">
           <label>2 · Seed vertex</label>
-          <label class="auto-toggle disabled"><input type="checkbox" id="auto-seed" disabled /> Auto-pick seed (Claude optimizes) 🎯</label>
+          <label class="auto-toggle disabled"><input type="checkbox" id="auto-seed" disabled /> Auto-pick seed &amp; width (Claude optimizes) 🎯</label>
           <span class="seed-pill" id="seed-pill">click the mesh to pick</span>
           <div class="hint" id="seed-hint">Click a point on the mesh — crocheting starts here (the magic circle).</div>
         </div>
         <div class="row">
-          <label>3 · Stitch width — <span class="value" id="sw-val">0.050</span></label>
-          <input type="range" id="sw" min="0.02" max="0.12" step="0.005" value="0.05" />
-          <div class="hint">Smaller = more rows / finer pattern.</div>
+          <label>3 · Stitch width — <span class="value" id="sw-val">0.050</span>
+            <button id="auto-width" class="ep-mini" disabled title="Set width from the narrowest feature of the current seed">Auto</button>
+          </label>
+          <input type="range" id="sw" min="0.01" max="0.12" step="0.005" value="0.05" />
+          <div class="hint" id="sw-hint">Smaller = more rows / finer pattern. <b>Auto</b> sizes it to the narrowest feature.</div>
         </div>
         <div class="row">
           <button id="run" disabled>Generate pattern</button>
@@ -210,6 +212,6 @@
     }
   }
   </script>
-  <script type="module" src="/static/app.js?v=10"></script>
+  <script type="module" src="/static/app.js?v=11"></script>
 </body>
 </html>

@@ -33,7 +33,8 @@ from .edit import apply as apply_edit, EDIT_OPS
 from .localize import localize
 from .mesh_ops import normalize_to_unit_area
 from .pipeline import amigo_pipeline_data
-from .quality import evaluate_seed as _evaluate_seed, summarize_metrics
+from .quality import (evaluate_seed as _evaluate_seed, summarize_metrics,
+                      suggest_stitch_width as _suggest_stitch_width)
 from .seed_search import seed_candidates
 
 MODEL = "claude-opus-4-8"
@@ -217,39 +218,45 @@ def _tools() -> list[dict]:
 
 
 SEED_SYSTEM_PROMPT = """\
-You choose the best SEED vertex for turning a 3D mesh into a single-piece \
-amigurumi crochet pattern with the AmiGo technique, by closed-loop trial.
+You choose the best SEED vertex AND STITCH WIDTH for turning a 3D mesh into a \
+single-piece amigurumi crochet pattern with the AmiGo technique, by closed-loop \
+trial.
 
 The AmiGo technique computes a geodesic distance field from the seed, treats \
 its isolines as crochet rows, segments the mesh at saddle points to handle \
 limbs, and walks the rows to emit stitches. The seed is the magic-ring start, \
 so its placement strongly affects quality. A good seed is usually a natural \
-pole/tip of the shape, so the field flows cleanly over the whole surface.
+pole/tip of the shape. The stitch width sets how many stitches each row gets \
+(row circumference / width).
 
-Two failure modes tell you a seed is bad:
-- UNCOVERED surface: regions no stitch represents (low `coverage`, high \
-`uncovered_area_fraction`). Often a limb or lobe the rows never reach.
+Three failure modes tell you a choice is bad:
+- UNCOVERED surface: regions no stitch represents (low `coverage`). Often a \
+limb the rows never reach — try seeding from that limb's tip.
+- THIN segments: features so narrow that rows fall below ~3 stitches \
+(`n_thin_segments` > 0) — uncrochetable. The fix is a FINER stitch width.
 - FLOATING stitches: column/row edges far longer than a stitch (`n_floating`), \
-which span empty space across a concave or branching gap instead of hugging \
-the surface. Common on concave cross-sections seeded from the wrong end.
+spanning empty space across concave/branching gaps. A finer width tends to ADD \
+these on concave cross-sections, so there is a tension with the thin-segment fix.
 
 You have these tools:
 - get_diagnostics: topology/geometry of the mesh (call once up front).
-- list_seed_candidates: a diverse, well-separated set of candidate seed \
-vertices (poles and geodesic farthest points), each with a descriptor.
-- evaluate_seed: run the FULL pipeline at a seed and return its quality metrics \
-(score, coverage, n_floating, thin/cap segments). This is your trial step.
-- submit_seed_choice: report the winning seed. Call exactly once, at the end.
+- list_seed_candidates: a diverse set of candidate seed vertices.
+- suggest_stitch_width(seed): a heuristic width from the narrowest feature's \
+girth (so the thinnest part still gets enough stitches). A STARTING POINT only.
+- evaluate_seed(seed, stitch_width): run the FULL pipeline and return quality \
+metrics (score, coverage, n_floating, n_thin_segments). Your trial step.
+- submit_seed_choice(seed, stitch_width, ...): report the winner. Call once.
 
 Process — iterate, do not guess:
-1. get_diagnostics, then list_seed_candidates.
-2. evaluate_seed on the most promising candidates (typically 3-4 trials). \
-Read each result: if a limb is uncovered, try a seed at that limb's tip; if \
-there are floating stitches on a concave loop, try seeding from the opposite \
-pole. Use the candidate descriptors and metrics to reason about the NEXT seed.
-3. Keep the seed with the highest score (favour high coverage AND zero/few \
-floating stitches). When further trials stop improving, submit_seed_choice with \
-that seed, its score, and brief reasons. Keep narration short.\
+1. get_diagnostics, list_seed_candidates, and suggest_stitch_width for the \
+leading candidate to get a width estimate.
+2. evaluate_seed on a few promising seeds (typically 3-4 trials). When a trial \
+shows thin segments, RE-EVALUATE that seed at a finer width; when a finer width \
+balloons floating stitches with no thin segments to fix, prefer the coarser one. \
+The `score` already balances coverage, floating and thin segments — maximize it.
+3. Keep the (seed, width) pair with the highest score. When trials stop \
+improving, submit_seed_choice with that seed AND stitch_width, plus brief \
+reasons. Keep narration short.\
 """
 
 
@@ -268,17 +275,34 @@ def _seed_tools() -> list[dict]:
             "input_schema": {"type": "object", "properties": {}},
         },
         {
+            "name": "suggest_stitch_width",
+            "description": "Estimate a stitch width from the narrowest feature's girth "
+                           "so the thinnest part still gets enough stitches per row. A "
+                           "starting point — evaluate_seed will confirm whether it helps.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "seed": {"type": "integer", "description": "Seed vertex index."},
+                    "target_min_stitches": {"type": "integer",
+                                            "description": "Min stitches on the thinnest "
+                                                           "row (default 5)."},
+                },
+                "required": ["seed"],
+            },
+        },
+        {
             "name": "evaluate_seed",
-            "description": "Run the full AmiGo pipeline at this seed and return pattern "
-                           "quality metrics: score, coverage, uncovered_area_fraction, "
-                           "n_floating (floating stitches), n_thin_segments, n_saddles. "
-                           "Your per-round trial-and-analyze step.",
+            "description": "Run the full AmiGo pipeline at this seed and stitch width and "
+                           "return pattern quality metrics: score, coverage, "
+                           "uncovered_area_fraction, n_floating (floating stitches), "
+                           "n_thin_segments, n_saddles. Your per-round trial step.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "seed": {"type": "integer", "description": "Seed vertex index."},
                     "stitch_width": {"type": "number",
-                                     "description": "Stitch size (default 0.05)."},
+                                     "description": "Stitch size (default 0.05). Try a "
+                                                    "finer width to fix thin segments."},
                 },
                 "required": ["seed"],
             },
@@ -301,6 +325,11 @@ def _seed_tools() -> list[dict]:
             },
         },
     ]
+
+
+def _metrics_key(seed, stitch_width) -> str:
+    """Cache key for a (seed, width) evaluation."""
+    return f"{int(seed)}@{float(stitch_width):.4f}"
 
 
 def _run_tool(name, tool_input, state, emit, get_decision):
@@ -370,12 +399,22 @@ def _run_tool(name, tool_input, state, emit, get_decision):
         V, F = state["current"]
         return json.dumps(seed_candidates(V, F)), False, None
 
+    if name == "suggest_stitch_width":
+        V, F = state["current"]
+        seed = int(tool_input["seed"])
+        kw = {}
+        if tool_input.get("target_min_stitches") is not None:
+            kw["target_min_stitches"] = int(tool_input["target_min_stitches"])
+        res = _suggest_stitch_width(V, F, seed, **kw)
+        return json.dumps(res), (not res.get("ok", False)), None
+
     if name == "evaluate_seed":
         V, F = state["current"]
         seed = int(tool_input["seed"])
         sw = float(tool_input.get("stitch_width", state.get("stitch_width", 0.05)))
         m = _evaluate_seed(V, F, seed, sw)
-        state.setdefault("metrics", {})[seed] = m  # keep full metrics for the UI
+        # Key by (seed, width) so a later coarse re-eval doesn't clobber a fine one.
+        state.setdefault("metrics", {})[_metrics_key(seed, sw)] = m
         summ = summarize_metrics(m)
         emit({"type": "seed_eval", "summary": summ})  # surface each candidate's score
         return json.dumps(summ), (not m.get("ran", False)), None
@@ -499,14 +538,21 @@ def run_seed_optimization(state, *, emit, get_decision=None,
     messages = [{
         "role": "user",
         "content": (
-            f"Find the best seed vertex for crocheting this mesh at stitch_width="
-            f"{stitch_width}. Start with get_diagnostics and list_seed_candidates, "
-            f"then evaluate_seed a few candidates and iterate to the best."),
+            f"Find the best seed vertex AND stitch width for crocheting this mesh "
+            f"(a starting width of {stitch_width} is a hint — pick the width that "
+            f"best fits the feature sizes). Start with get_diagnostics, "
+            f"list_seed_candidates and suggest_stitch_width, then evaluate_seed a "
+            f"few (seed, width) pairs and iterate to the best."),
     }]
 
     def on_terminal(choice):
-        emit({"type": "seed_choice", "choice": choice,
-              "metrics": state.get("metrics", {}).get(int(choice["seed"]))})
+        V, F = state["current"]
+        sw = float(choice.get("stitch_width", stitch_width))
+        # Prefer the cached metrics for the exact chosen pair; recompute if absent.
+        metrics = state.get("metrics", {}).get(_metrics_key(choice["seed"], sw))
+        if metrics is None:
+            metrics = _evaluate_seed(V, F, int(choice["seed"]), sw)
+        emit({"type": "seed_choice", "choice": choice, "metrics": metrics})
 
     return _drive(messages, tools=_seed_tools(), system=SEED_SYSTEM_PROMPT,
                   state=state, emit=emit, get_decision=get_decision,
