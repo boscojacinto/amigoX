@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .mesh_ops import load_mesh, normalize_to_unit_area
+from .mesh_ops import load_mesh, normalize_to_unit_area, weld_vertices
 from .geodesics import (
     auto_smooth_geodesic,
     find_maximum,
@@ -137,6 +137,25 @@ def amigo_pipeline_data(
         "crochetparade": crochetparade (.cp) string
     """
     # ------------------------------------------------------------------
+    # 1b. Weld coincident vertices. Split seams (duplicated verts) disconnect
+    #     the surface, so the geodesic can't cross them and whole patches get a
+    #     constant f → no isolines → uncovered regions. We compute everything on
+    #     the welded mesh and map the field/indices back to the caller's original
+    #     vertex indexing on the way out (the web UI keys off the original mesh).
+    # ------------------------------------------------------------------
+    V_orig_n = len(V)
+    Vw, Fw, old2new = weld_vertices(V, F)
+    if verbose and len(Vw) < V_orig_n:
+        print(f"  welded {V_orig_n} → {len(Vw)} vertices "
+              f"({V_orig_n - len(Vw)} coincident)")
+    # A representative original vertex for each welded vertex (for output remap).
+    new2old = np.zeros(len(Vw), dtype=int)
+    new2old[old2new] = np.arange(V_orig_n)
+    seed_orig = int(seed_idx)
+    V, F = Vw, Fw
+    seed_idx = int(old2new[seed_orig])
+
+    # ------------------------------------------------------------------
     # 2. Geodesic distance f
     # ------------------------------------------------------------------
     if verbose:
@@ -153,7 +172,7 @@ def amigo_pipeline_data(
     # ------------------------------------------------------------------
     # 3. Segment decomposition + parent/child tree (join-as-you-go)
     # ------------------------------------------------------------------
-    segments = segment_by_saddles(V, F, f, saddles)
+    segments = segment_by_saddles(V, F, f, saddles, stitch_width=stitch_width)
     seg_data = segment_meshes(V, F, segments)
     parent, children, order = build_segment_tree(seg_data, seed_idx)
     if verbose:
@@ -255,12 +274,15 @@ def amigo_pipeline_data(
         pattern = format_pattern(all_instructions)
         cp = to_crochetparade(all_instructions)
 
+    # Map field (per welded vertex) and indices back to the caller's original
+    # vertex space so the web UI can colour the un-welded mesh it holds.
+    field_orig = f[old2new]
     return {
-        "field": f.astype(float).tolist(),
+        "field": field_orig.astype(float).tolist(),
         "field_max": float(f[f_max_idx]),
-        "seed": int(seed_idx),
-        "tip": int(f_max_idx),
-        "saddles": [int(s) for s in saddles],
+        "seed": seed_orig,
+        "tip": int(new2old[f_max_idx]),
+        "saddles": [int(new2old[s]) for s in saddles],
         "segments": viz_segments,
         "instructions": all_instructions,
         "pattern": pattern,

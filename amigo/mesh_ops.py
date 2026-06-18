@@ -15,6 +15,43 @@ def load_mesh(path: str):
     return V, F
 
 
+def weld_vertices(V, F, tol=1e-6):
+    """
+    Merge coincident (duplicated) vertices into one.
+
+    Many ``.obj`` exports split the mesh along seams, leaving several vertices
+    at the exact same position. Topologically this disconnects the surface, so
+    the heat-method geodesic can't propagate across the seam and clamps whole
+    regions to a constant value (which then can't be crocheted — they have no
+    isolines). Welding restitches those seams.
+
+    Returns
+    -------
+    V_w     : (m, 3) welded vertex positions (m <= n)
+    F_w     : (k, 3) faces re-indexed onto V_w, with degenerate faces removed
+    old2new : (n,) map from each original vertex index to its welded index
+    """
+    V = np.asarray(V, dtype=np.float64)
+    diag = float(np.linalg.norm(V.max(axis=0) - V.min(axis=0))) or 1.0
+    key = np.round(V / (diag * tol)).astype(np.int64)
+    _, old2new = np.unique(key, axis=0, return_inverse=True)
+    old2new = np.asarray(old2new).reshape(-1)
+
+    m = int(old2new.max()) + 1
+    V_w = np.zeros((m, 3), dtype=np.float64)
+    counts = np.zeros(m)
+    np.add.at(V_w, old2new, V)
+    np.add.at(counts, old2new, 1.0)
+    V_w /= counts[:, None]
+
+    F_w = old2new[np.asarray(F)]
+    nondegen = ((F_w[:, 0] != F_w[:, 1])
+                & (F_w[:, 1] != F_w[:, 2])
+                & (F_w[:, 0] != F_w[:, 2]))
+    F_w = F_w[nondegen].astype(np.int32)
+    return V_w, F_w, old2new
+
+
 def normalize_to_unit_area(V, F):
     """Scale V so that total surface area equals 1. Returns (V_norm, scale)."""
     areas = face_areas(V, F)

@@ -84,10 +84,12 @@ def _split_branches(F, f_face, faces, f_lo, f_hi, is_first, min_faces, depth=0):
         return [{"faces": faces, "f_lo": f_lo, "f_hi": f_hi, "is_first": is_first}]
 
     lower = faces[fb < split_L]
+    # Keep every upper component (including small ones) so no faces are dropped;
+    # the merge pass folds sub-threshold pieces into a neighbour.
     upper_comps = [c for c in _face_components(F, faces[fb >= split_L])
-                   if len(c) >= min_faces]
+                   if len(c) > 0]
     out = []
-    if len(lower) >= min_faces:
+    if len(lower) > 0:
         out.append({"faces": lower, "f_lo": f_lo, "f_hi": split_L,
                     "is_first": is_first})
         child_first = False
@@ -99,7 +101,8 @@ def _split_branches(F, f_face, faces, f_lo, f_hi, is_first, min_faces, depth=0):
     return out
 
 
-def segment_by_saddles(V, F, f: np.ndarray, saddles: list[int]):
+def segment_by_saddles(V, F, f: np.ndarray, saddles: list[int],
+                       stitch_width: float = 0.05):
     """
     Partition mesh faces into segments by slicing at saddle isolines.
 
@@ -154,20 +157,96 @@ def segment_by_saddles(V, F, f: np.ndarray, saddles: list[int]):
         # tracer mixes loops and the crochet graph tangles).
         comps = _face_components(F, face_ids)
         for comp in comps:
-            # Keep the band whole if it is a single component (don't drop a
-            # small but legitimate base/tip band); only filter slivers when a
-            # band actually fragments into several components.
-            if len(comp) == 0 or (len(comps) > 1 and len(comp) < min_faces):
+            # Keep every non-empty component — dropping small ones here leaves
+            # holes in the surface (uncovered bands at branch junctions). The
+            # merge pass below folds sub-threshold components into a neighbour,
+            # so they're still crocheted; coverage stays complete.
+            if len(comp) == 0:
                 continue
             # A component may still bifurcate higher up (bulbous limbs that the
             # saddle pass missed) — split it where its cross-section divides.
             segments.extend(_split_branches(
                 F, f_face, comp, f_lo, f_hi, idx == 0, min_faces))
 
+    # Fold slivers back into a real neighbour. Banding near concave junctions
+    # (shoulders, neck) leaves razor-thin bands that otherwise become 1-stitch
+    # "rows" or orphan magic-ring starts. A genuine limb (even a small ear) is a
+    # bigger fraction of the mesh than these.
+    merge_min = max(min_faces, int(0.010 * len(F)))
+    segments = _merge_small_segments(F, segments, merge_min,
+                                     min_extent=1.5 * stitch_width)
+
     # is_last: a segment with no higher-f segment sharing its boundary is a tip.
     for s in segments:
         s.setdefault("is_last", False)
     return segments
+
+
+def _merge_small_segments(F, segments, min_faces, min_extent=0.0, max_iter=500):
+    """
+    Repeatedly fold every "too small" segment into the adjacent segment it
+    shares the most edges with (preferring the lower-f neighbour, so slivers
+    melt down toward the body rather than out toward a tip).
+
+    A segment is too small if it has fewer than ``min_faces`` faces *or* spans
+    less than ``min_extent`` in f (a band thinner than a stitch can't host even
+    one isoline row, so it would only ever yield degenerate 1-stitch "rows").
+
+    This removes the degenerate 1-stitch slivers and, by re-attaching their
+    faces to a real segment, also eliminates the orphan components that the
+    banding would otherwise strand as separate magic-ring pieces.
+    """
+    from collections import defaultdict
+
+    segments = [dict(s, faces=np.asarray(s["faces"], dtype=int)) for s in segments]
+
+    def too_small(s):
+        return (len(s["faces"]) < min_faces
+                or (s["f_hi"] - s["f_lo"]) < min_extent)
+
+    # Global edge → incident faces, built once.
+    edge_faces = defaultdict(list)
+    for fi in range(len(F)):
+        a, b, c = F[fi]
+        for u, v in ((a, b), (b, c), (c, a)):
+            edge_faces[(min(u, v), max(u, v))].append(fi)
+
+    stuck: set[int] = set()
+    for _ in range(max_iter):
+        face_seg = {}
+        for si, s in enumerate(segments):
+            for fi in s["faces"]:
+                face_seg[int(fi)] = si
+
+        small = [si for si, s in enumerate(segments)
+                 if len(s["faces"]) > 0 and too_small(s) and si not in stuck]
+        if not small:
+            break
+        si = min(small, key=lambda i: len(segments[i]["faces"]))
+
+        # Count shared edges with each neighbouring segment.
+        neigh = defaultdict(int)
+        for fi in segments[si]["faces"]:
+            a, b, c = F[fi]
+            for u, v in ((a, b), (b, c), (c, a)):
+                for nf in edge_faces[(min(u, v), max(u, v))]:
+                    ns = face_seg.get(int(nf))
+                    if ns is not None and ns != si:
+                        neigh[ns] += 1
+        if not neigh:
+            # A genuinely isolated component (e.g. a separate mesh piece) — keep
+            # it as its own segment rather than dropping its faces.
+            stuck.add(si)
+            continue
+
+        tgt = max(neigh, key=lambda n: (neigh[n], -segments[n]["f_lo"]))
+        segments[tgt]["faces"] = np.concatenate(
+            [segments[tgt]["faces"], segments[si]["faces"]])
+        segments[tgt]["f_lo"] = min(segments[tgt]["f_lo"], segments[si]["f_lo"])
+        segments[tgt]["f_hi"] = max(segments[tgt]["f_hi"], segments[si]["f_hi"])
+        segments[si]["faces"] = np.empty(0, dtype=int)
+
+    return [s for s in segments if len(s["faces"]) > 0]
 
 
 def segment_meshes(V, F, segments: list[dict]):
@@ -241,6 +320,23 @@ def build_segment_tree(seg_data: list[dict], seed_idx: int):
             if ov > best_ov:
                 best, best_ov = s, ov
         parent[t] = best
+
+    # No orphan roots: a segment that shares no boundary vertices with any
+    # lower-f segment (a banding artefact) must still be worked into the body,
+    # not started as its own floating magic ring. Attach it to the spatially
+    # nearest lower-f segment. Only the globally-lowest segment (the seed side,
+    # which has no lower-f candidate) stays a true root.
+    from scipy.spatial import cKDTree
+    for t in range(n):
+        if parent[t] >= 0:
+            continue
+        cand = [s for s in range(n)
+                if s != t and seg_data[s]["f_lo"] < seg_data[t]["f_lo"]]
+        if not cand:
+            continue
+        Vt = seg_data[t]["V"]
+        parent[t] = min(
+            cand, key=lambda s: float(cKDTree(seg_data[s]["V"]).query(Vt)[0].min()))
 
     children = {i: [] for i in range(n)}
     for t in range(n):

@@ -79,7 +79,7 @@ def sample_crochet_graph(
         rows_pos.append(V[seed_idx: seed_idx + 1].copy())
         row_f.append(0.0)
 
-    for i in range(1, n_rows):
+    for i in range(1, n_rows + 1):
         f_level = i * stitch_width
         if f_level >= f_max:
             break
@@ -161,14 +161,11 @@ def _face_crossing_edges(face, crossings):
     return [e for e in edges if e in crossings]
 
 
-def _walk_loop(F, crossings, edge_faces, start_edge):
-    """Trace one connected isoline loop from start_edge. Returns (points, visited)."""
-    start_faces = edge_faces.get(start_edge, [])
-    if not start_faces:
-        return [crossings[start_edge]], {start_edge}
-    path = [crossings[start_edge]]
-    visited = {start_edge}
-    current_face_idx = start_faces[0]
+def _walk_from(F, crossings, edge_faces, first_face, visited):
+    """Walk the isoline forward starting *into* ``first_face``, appending each
+    new crossing. ``visited`` is mutated. Returns the ordered points walked."""
+    path = []
+    current_face_idx = first_face
     for _ in range(len(crossings) + 1):
         ce = _face_crossing_edges(F[current_face_idx], crossings)
         next_edge = next((e for e in ce if e not in visited), None)
@@ -180,6 +177,29 @@ def _walk_loop(F, crossings, edge_faces, start_edge):
         if not nb:
             break
         current_face_idx = nb[0]
+    return path
+
+
+def _walk_loop(F, crossings, edge_faces, start_edge):
+    """
+    Trace one connected isoline component from ``start_edge``. Returns
+    (ordered points, visited edge set).
+
+    The start edge generally sits in the *middle* of the isoline, so we walk
+    out of *both* incident faces and stitch the two halves. Walking only one
+    side (the old behaviour) dead-ends after a couple of points on an open arc
+    — exactly what happens inside a cut segment whose isoline runs between two
+    boundaries — dropping the whole row.
+    """
+    start_faces = edge_faces.get(start_edge, [])
+    if not start_faces:
+        return [crossings[start_edge]], {start_edge}
+    visited = {start_edge}
+    fwd = _walk_from(F, crossings, edge_faces, start_faces[0], visited)
+    bwd = []
+    if len(start_faces) > 1:
+        bwd = _walk_from(F, crossings, edge_faces, start_faces[1], visited)
+    path = list(reversed(bwd)) + [crossings[start_edge]] + fwd
     return path, visited
 
 
@@ -214,7 +234,12 @@ def _trace_isoline(V, F, f, f_level, edge_faces, seam_edge_set, axis):
 
     if not loops:
         return []
-    seam_loops = [p for p, touches in loops if touches]
+    # Prefer the loop the seam passes through (consistent start across rows),
+    # but only if it is a substantial loop — otherwise the seam may clip a tiny
+    # fragment of a fragmented isoline and we'd drop the real row. Fall back to
+    # the largest loop overall.
+    biggest = max(len(p) for p, _ in loops)
+    seam_loops = [p for p, touches in loops if touches and len(p) >= 0.5 * biggest]
     candidates = seam_loops if seam_loops else [p for p, _ in loops]
     return max(candidates, key=len)
 
