@@ -90,6 +90,11 @@
       background: var(--panel-2); font-size: 12px; font-variant-numeric: tabular-nums;
     }
     .hint { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.4; }
+    .auto-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px;
+      margin: 6px 0; cursor: pointer; user-select: none; }
+    .auto-toggle input { width: auto; cursor: pointer; }
+    .auto-toggle.disabled { opacity: .4; cursor: not-allowed; }
+    .seed-score { color: var(--accent-2); font-variant-numeric: tabular-nums; }
 
     .stats { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 4px; flex-wrap: wrap; }
     .stats b { color: var(--text); font-weight: 600; }
@@ -140,8 +145,9 @@
         </div>
         <div class="row">
           <label>2 · Seed vertex</label>
+          <label class="auto-toggle disabled"><input type="checkbox" id="auto-seed" disabled /> Auto-pick seed (Claude optimizes) 🎯</label>
           <span class="seed-pill" id="seed-pill">click the mesh to pick</span>
-          <div class="hint">Click a point on the mesh — crocheting starts here (the magic circle).</div>
+          <div class="hint" id="seed-hint">Click a point on the mesh — crocheting starts here (the magic circle).</div>
         </div>
         <div class="row">
           <label>3 · Stitch width — <span class="value" id="sw-val">0.050</span></label>
@@ -204,6 +210,6 @@
     }
   }
   </script>
-  <script type="module" src="/static/app.js?v=7"></script>
+  <script type="module" src="/static/app.js?v=10"></script>
 </body>
 </html>

@@ -60,6 +60,18 @@ the matching tool — fill a boundary loop, delete a stray piece, inflate a thin
 limb, smooth noise, or **cut a handle to reduce genus**. The agent can also
 propose precise edits you preview and approve.
 
+**Phase 4 — closed-loop seed optimization.** The seed vertex (the magic-ring
+start) strongly affects pattern quality, so the agent now **picks it for you**.
+A deterministic scorer (`quality.py`) rates each pattern for **surface coverage**
+(area no stitch represents) and **floating stitches** (column/row edges that span
+empty space across a concave/branching gap instead of hugging the surface). The
+agent lists candidate seeds (`seed_search.py` — principal pole + geodesic
+farthest points), evaluates a few, reasons about what's uncovered or floating,
+and iterates ~3–4 rounds to the best seed. Toggle **"Auto-pick seed"** in the web
+UI and *Generate* runs the optimizer instead of using a hand-picked seed (it
+overlays the culprits — red = uncovered, yellow = floating); untick it for the
+manual click-to-pick workflow. The CLI (`optimize.py`) shares the same agent core.
+
 ---
 
 ## Setup
@@ -86,6 +98,9 @@ python main.py test_soccer.obj --seed 0 --stitch-width 0.05
 
 # CLI: assess + repair a mesh (needs ANTHROPIC_API_KEY)
 python assess.py Sphere_w_hole.obj          # add --yes to auto-approve fixes
+
+# CLI: auto-pick the best seed, then write its pattern (needs ANTHROPIC_API_KEY)
+python optimize.py teddy.obj                 # add --deterministic to skip the LLM
 ```
 
 Sample meshes are included (`test_soccer.obj`, `Sphere_w_hole.obj`, `harry.obj`, …).
@@ -106,12 +121,15 @@ amigo/
   simplify.py      global repair transforms
   localize.py      localized problem detectors (incl. tree-cotree handle loops)
   edit.py          mesh-edit ops (fill_loop, inflate, cut_handle, …)
-  agent.py         the crochetability agent (claude-opus-4-8)
+  quality.py       pattern scorer — coverage + floating-stitch metrics
+  seed_search.py   seed candidate generation (pole + geodesic FPS) + ranking
+  agent.py         the agent (claude-opus-4-8): assess + seed optimization
 server/
-  app.py           FastAPI backend (pipeline, assess SSE, localize/edit)
+  app.py           FastAPI backend (pipeline, assess SSE, optimize SSE, localize/edit)
   static/          three.js frontend (app.js viewer, edit.js editor)
 main.py            CLI: mesh → pattern
 assess.py          CLI: assess + repair a mesh
+optimize.py        CLI: closed-loop best-seed search → pattern
 run_ui.py          launch the web UI
 ```
 

@@ -33,6 +33,8 @@ from .edit import apply as apply_edit, EDIT_OPS
 from .localize import localize
 from .mesh_ops import normalize_to_unit_area
 from .pipeline import amigo_pipeline_data
+from .quality import evaluate_seed as _evaluate_seed, summarize_metrics
+from .seed_search import seed_candidates
 
 MODEL = "claude-opus-4-8"
 
@@ -214,8 +216,95 @@ def _tools() -> list[dict]:
     ]
 
 
+SEED_SYSTEM_PROMPT = """\
+You choose the best SEED vertex for turning a 3D mesh into a single-piece \
+amigurumi crochet pattern with the AmiGo technique, by closed-loop trial.
+
+The AmiGo technique computes a geodesic distance field from the seed, treats \
+its isolines as crochet rows, segments the mesh at saddle points to handle \
+limbs, and walks the rows to emit stitches. The seed is the magic-ring start, \
+so its placement strongly affects quality. A good seed is usually a natural \
+pole/tip of the shape, so the field flows cleanly over the whole surface.
+
+Two failure modes tell you a seed is bad:
+- UNCOVERED surface: regions no stitch represents (low `coverage`, high \
+`uncovered_area_fraction`). Often a limb or lobe the rows never reach.
+- FLOATING stitches: column/row edges far longer than a stitch (`n_floating`), \
+which span empty space across a concave or branching gap instead of hugging \
+the surface. Common on concave cross-sections seeded from the wrong end.
+
+You have these tools:
+- get_diagnostics: topology/geometry of the mesh (call once up front).
+- list_seed_candidates: a diverse, well-separated set of candidate seed \
+vertices (poles and geodesic farthest points), each with a descriptor.
+- evaluate_seed: run the FULL pipeline at a seed and return its quality metrics \
+(score, coverage, n_floating, thin/cap segments). This is your trial step.
+- submit_seed_choice: report the winning seed. Call exactly once, at the end.
+
+Process — iterate, do not guess:
+1. get_diagnostics, then list_seed_candidates.
+2. evaluate_seed on the most promising candidates (typically 3-4 trials). \
+Read each result: if a limb is uncovered, try a seed at that limb's tip; if \
+there are floating stitches on a concave loop, try seeding from the opposite \
+pole. Use the candidate descriptors and metrics to reason about the NEXT seed.
+3. Keep the seed with the highest score (favour high coverage AND zero/few \
+floating stitches). When further trials stop improving, submit_seed_choice with \
+that seed, its score, and brief reasons. Keep narration short.\
+"""
+
+
+def _seed_tools() -> list[dict]:
+    return [
+        {
+            "name": "get_diagnostics",
+            "description": "Topology/geometry diagnostics for the current mesh.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "list_seed_candidates",
+            "description": "Return a diverse, well-separated set of candidate seed "
+                           "vertices (principal pole + geodesic farthest points), each "
+                           "with a short descriptor. Start here, then evaluate_seed them.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "evaluate_seed",
+            "description": "Run the full AmiGo pipeline at this seed and return pattern "
+                           "quality metrics: score, coverage, uncovered_area_fraction, "
+                           "n_floating (floating stitches), n_thin_segments, n_saddles. "
+                           "Your per-round trial-and-analyze step.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "seed": {"type": "integer", "description": "Seed vertex index."},
+                    "stitch_width": {"type": "number",
+                                     "description": "Stitch size (default 0.05)."},
+                },
+                "required": ["seed"],
+            },
+        },
+        {
+            "name": "submit_seed_choice",
+            "description": "Report the best seed found. Call exactly once, at the end.",
+            "strict": True,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "seed": {"type": "integer"},
+                    "stitch_width": {"type": "number"},
+                    "score": {"type": "number"},
+                    "reasons": {"type": "array", "items": {"type": "string"}},
+                    "summary": {"type": "string"},
+                },
+                "required": ["seed", "stitch_width", "score", "reasons", "summary"],
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
 def _run_tool(name, tool_input, state, emit, get_decision):
-    """Execute a tool. Returns (result_str, is_error, verdict_or_None)."""
+    """Execute a tool. Returns (result_str, is_error, terminal_payload_or_None)."""
     if name == "get_diagnostics":
         V, F = state["current"]
         return json.dumps(analyze_mesh(V, F)), False, None
@@ -277,39 +366,57 @@ def _run_tool(name, tool_input, state, emit, get_decision):
                   "checklist": localize(V2, F2)["checklist"]}
         return json.dumps(result), False, None
 
+    if name == "list_seed_candidates":
+        V, F = state["current"]
+        return json.dumps(seed_candidates(V, F)), False, None
+
+    if name == "evaluate_seed":
+        V, F = state["current"]
+        seed = int(tool_input["seed"])
+        sw = float(tool_input.get("stitch_width", state.get("stitch_width", 0.05)))
+        m = _evaluate_seed(V, F, seed, sw)
+        state.setdefault("metrics", {})[seed] = m  # keep full metrics for the UI
+        summ = summarize_metrics(m)
+        emit({"type": "seed_eval", "summary": summ})  # surface each candidate's score
+        return json.dumps(summ), (not m.get("ran", False)), None
+
     if name == "submit_verdict":
+        return None, False, dict(tool_input)
+
+    if name == "submit_seed_choice":
         return None, False, dict(tool_input)
 
     return f"Unknown tool '{name}'.", True, None
 
 
-def run_assessment(state, *, emit, get_decision, max_steps: int = 16):
-    """
-    Drive the crochetability agent. See module docstring.
-
-    Requires ANTHROPIC_API_KEY in the environment (or a nearby .env file).
-    """
+def _require_key():
+    """Load .env and ensure an Anthropic credential is present."""
     _load_dotenv()
     if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
         raise RuntimeError(
-            "ANTHROPIC_API_KEY is not set — the crochetability agent needs an "
+            "ANTHROPIC_API_KEY is not set — the agent needs an "
             "Anthropic API key (claude-opus-4-8).")
 
+
+def _drive(messages, *, tools, system, state, emit, get_decision,
+           max_steps, on_terminal):
+    """
+    Shared streaming agentic loop. Returns the terminal tool payload (the verdict
+    or seed choice) or None if the model ended without calling a terminal tool.
+
+    ``on_terminal(payload)`` is invoked when a tool returns a terminal payload,
+    so each mode can emit its own event shape.
+    """
+    _require_key()
     import anthropic
     client = anthropic.Anthropic()
-    tools = _tools()
-    messages = [{
-        "role": "user",
-        "content": "Assess whether this mesh is crochetable by the AmiGo technique. "
-                   "Start by calling get_diagnostics.",
-    }]
-    verdict = None
+    result = None
 
     for _ in range(max_steps):
         with client.messages.stream(
             model=MODEL,
             max_tokens=16000,
-            system=SYSTEM_PROMPT,
+            system=system,
             thinking={"type": "adaptive", "display": "summarized"},
             output_config={"effort": "high"},
             tools=tools,
@@ -333,21 +440,74 @@ def run_assessment(state, *, emit, get_decision, max_steps: int = 16):
         stop = False
         for tu in tool_uses:
             emit({"type": "tool_call", "name": tu.name, "input": tu.input})
-            result, is_error, maybe_verdict = _run_tool(
+            res, is_error, maybe_terminal = _run_tool(
                 tu.name, tu.input, state, emit, get_decision)
-            if maybe_verdict is not None:
-                verdict = maybe_verdict
-                emit({"type": "verdict", "verdict": verdict,
-                      "mesh_changed": len(state["applied"]) > 0})
+            if maybe_terminal is not None:
+                result = maybe_terminal
+                on_terminal(result)
                 stop = True
                 break
             emit({"type": "tool_result", "name": tu.name, "is_error": is_error})
             tool_results.append({
                 "type": "tool_result", "tool_use_id": tu.id,
-                "content": result, "is_error": is_error,
+                "content": res, "is_error": is_error,
             })
         if stop:
             break
         messages.append({"role": "user", "content": tool_results})
 
-    return verdict
+    return result
+
+
+def run_assessment(state, *, emit, get_decision, max_steps: int = 16):
+    """
+    Drive the crochetability agent. See module docstring.
+
+    Requires ANTHROPIC_API_KEY in the environment (or a nearby .env file).
+    """
+    messages = [{
+        "role": "user",
+        "content": "Assess whether this mesh is crochetable by the AmiGo technique. "
+                   "Start by calling get_diagnostics.",
+    }]
+
+    def on_terminal(verdict):
+        emit({"type": "verdict", "verdict": verdict,
+              "mesh_changed": len(state["applied"]) > 0})
+
+    return _drive(messages, tools=_tools(), system=SYSTEM_PROMPT, state=state,
+                  emit=emit, get_decision=get_decision, max_steps=max_steps,
+                  on_terminal=on_terminal)
+
+
+def run_seed_optimization(state, *, emit, get_decision=None,
+                          stitch_width: float = 0.05, max_steps: int = 10):
+    """
+    Closed-loop seed optimizer. The agent lists candidate seeds, evaluates the
+    pattern each produces (coverage / floating stitches), iterates ~3-4 rounds,
+    and submits the best seed via submit_seed_choice.
+
+    Returns the seed-choice dict (or None). The chosen seed's full quality
+    metrics are stashed in ``state["metrics"][seed]`` for the UI to highlight.
+    Requires ANTHROPIC_API_KEY (no mesh mutation, so no approval gate is used).
+    """
+    state["stitch_width"] = float(stitch_width)
+    state.setdefault("metrics", {})
+    if get_decision is None:
+        get_decision = lambda proposal: {"approve": False, "note": ""}  # noqa: E731
+
+    messages = [{
+        "role": "user",
+        "content": (
+            f"Find the best seed vertex for crocheting this mesh at stitch_width="
+            f"{stitch_width}. Start with get_diagnostics and list_seed_candidates, "
+            f"then evaluate_seed a few candidates and iterate to the best."),
+    }]
+
+    def on_terminal(choice):
+        emit({"type": "seed_choice", "choice": choice,
+              "metrics": state.get("metrics", {}).get(int(choice["seed"]))})
+
+    return _drive(messages, tools=_seed_tools(), system=SEED_SYSTEM_PROMPT,
+                  state=state, emit=emit, get_decision=get_decision,
+                  max_steps=max_steps, on_terminal=on_terminal)

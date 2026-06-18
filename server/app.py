@@ -203,6 +203,68 @@ async def assess_decision(sid: str, req: DecisionRequest):
 
 
 # ----------------------------------------------------------------------------
+# Closed-loop seed optimization
+# ----------------------------------------------------------------------------
+class OptimizeRequest(BaseModel):
+    id: str
+    stitch_width: float = 0.05
+
+
+def _run_optimize_session(sid: str, V, F, stitch_width: float):
+    """Background thread: drive the seed optimizer, bridging events to the queue."""
+    from amigo import run_seed_optimization
+
+    sess = _SESSIONS[sid]
+    state = {"current": (np.asarray(V, dtype=np.float64),
+                         np.asarray(F, dtype=np.int64)), "applied": []}
+
+    def emit(ev):
+        sess["events"].put(ev)
+
+    try:
+        run_seed_optimization(state, emit=emit, stitch_width=stitch_width)
+    except Exception as exc:  # noqa: BLE001
+        traceback.print_exc()
+        sess["events"].put({"type": "error", "message": str(exc)})
+    sess["events"].put({"type": "_end"})
+
+
+@app.post("/api/optimize")
+async def optimize_start(req: OptimizeRequest):
+    mesh = _MESHES.get(req.id)
+    if mesh is None:
+        raise HTTPException(status_code=404, detail="Mesh not found — upload it first.")
+    if req.stitch_width <= 0:
+        raise HTTPException(status_code=400, detail="Stitch width must be positive.")
+    sid = uuid.uuid4().hex
+    _SESSIONS[sid] = {"events": queue.Queue(), "decisions": queue.Queue()}
+    threading.Thread(
+        target=_run_optimize_session,
+        args=(sid, mesh["V"], mesh["F"], req.stitch_width),
+        daemon=True).start()
+    return {"session_id": sid}
+
+
+@app.get("/api/optimize/{sid}/stream")
+def optimize_stream(sid: str):
+    sess = _SESSIONS.get(sid)
+    if sess is None:
+        raise HTTPException(status_code=404, detail="Optimization session not found.")
+
+    def gen():
+        while True:
+            ev = sess["events"].get()
+            if ev.get("type") == "_end":
+                yield "data: " + json.dumps({"type": "end"}) + "\n\n"
+                break
+            yield "data: " + json.dumps(ev) + "\n\n"
+        _SESSIONS.pop(sid, None)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"X-Accel-Buffering": "no"})
+
+
+# ----------------------------------------------------------------------------
 # Crochetability editor (Phase 3)
 # ----------------------------------------------------------------------------
 class EditRequest(BaseModel):

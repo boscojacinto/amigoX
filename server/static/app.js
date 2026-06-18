@@ -26,8 +26,10 @@ const els = {
   swVal: document.getElementById("sw-val"),
   run: document.getElementById("run"),
   assess: document.getElementById("assess"),
+  autoSeed: document.getElementById("auto-seed"),
   editToggle: document.getElementById("edit-toggle"),
   seedPill: document.getElementById("seed-pill"),
+  seedHint: document.getElementById("seed-hint"),
   pattern: document.getElementById("pattern"),
   panelTitle: document.getElementById("panel-title"),
   drawer: document.getElementById("drawer"),
@@ -72,6 +74,8 @@ scene.add(fill);
 let meshObj = null;     // the surface
 const overlay = new THREE.Group();   // stitch rows, saddles, markers
 scene.add(overlay);
+const optOverlay = new THREE.Group();  // optimizer culprits (uncovered / floating)
+scene.add(optOverlay);
 let seedMarker = null;
 
 const raycaster = new THREE.Raycaster();
@@ -181,7 +185,7 @@ let dragged = false;
 canvas.addEventListener("pointerdown", () => { dragged = false; });
 canvas.addEventListener("pointermove", () => { dragged = true; });
 canvas.addEventListener("pointerup", (ev) => {
-  if (dragged || !meshObj) return;
+  if (dragged || !meshObj || els.autoSeed.checked) return;  // auto mode picks the seed
   const rect = canvas.getBoundingClientRect();
   pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
@@ -197,9 +201,8 @@ canvas.addEventListener("pointerup", (ev) => {
     if (d < bestD) { bestD = d; best = vi; }
   }
   state.seed = best;
-  els.seedPill.textContent = `vertex #${best}`;
   placeSeedMarker(best);
-  els.run.disabled = false;
+  refreshSeedMode();
 });
 
 // ----------------------------------------------------------------------------
@@ -227,14 +230,16 @@ function loadMeshPayload(data) {
   state.centerArr = data.center;
   state.radius = data.radius;
   state.seed = null;
-  els.seedPill.textContent = "click the mesh to pick";
   showMesh();
   els.meshInfo.innerHTML = `<b>${data.n_verts}</b> verts · <b>${data.n_faces}</b> faces`;
   els.legend.style.display = "none";
   els.copy.style.display = "none";
-  els.run.disabled = true;
   els.assess.disabled = false;
+  els.autoSeed.disabled = false;
+  els.autoSeed.parentElement.classList.remove("disabled");
   els.editToggle.disabled = false;
+  clearOptimizeOverlay();
+  refreshSeedMode();
   editor?.onMeshLoaded();
 }
 
@@ -260,12 +265,51 @@ els.sw.addEventListener("input", () => {
   els.swVal.textContent = Number(els.sw.value).toFixed(3);
 });
 
-els.run.addEventListener("click", async () => {
-  if (state.seed == null || !state.meshId) return;
+// Reflect the current seed mode (auto vs manual) in the pill, hint and the
+// Generate button — and gate Generate accordingly.
+function refreshSeedMode() {
+  const auto = els.autoSeed.checked;
+  const hasMesh = !!state.meshId;
+  if (auto) {
+    els.seedPill.textContent =
+      state.seed == null ? "auto (Claude picks)" : `auto → vertex #${state.seed}`;
+    els.seedHint.textContent =
+      "Generate runs Claude's seed optimizer — it tries seeds and picks the best.";
+    els.run.textContent = "Generate (auto-seed) 🎯";
+    els.run.disabled = !hasMesh;
+  } else {
+    els.seedPill.textContent =
+      state.seed == null ? "click the mesh to pick" : `vertex #${state.seed}`;
+    els.seedHint.textContent =
+      "Click a point on the mesh — crocheting starts here (the magic circle).";
+    els.run.textContent = "Generate pattern";
+    els.run.disabled = !(hasMesh && state.seed != null);
+  }
+}
+
+els.autoSeed.addEventListener("change", () => {
+  if (els.autoSeed.checked && seedMarker) {
+    overlay.remove(seedMarker);
+    seedMarker.geometry.dispose();
+    seedMarker.material.dispose();
+    seedMarker = null;
+  }
+  clearOptimizeOverlay();
+  refreshSeedMode();
+});
+
+els.run.addEventListener("click", () => {
+  if (!state.meshId) return;
+  if (els.autoSeed.checked) runAuto();
+  else if (state.seed != null) runManual();
+});
+
+async function runManual() {
   els.run.disabled = true;
   els.agent.style.display = "none";
   els.pattern.style.display = "block";
   els.panelTitle.textContent = "Pattern";
+  clearOptimizeOverlay();
   setStatus("Generating pattern… (geodesics, segmentation, sampling)");
   try {
     const res = await fetch("/api/run", {
@@ -289,7 +333,7 @@ els.run.addEventListener("click", async () => {
   } finally {
     els.run.disabled = false;
   }
-});
+}
 
 els.copy.addEventListener("click", () => {
   navigator.clipboard.writeText(els.pattern.textContent);
@@ -444,6 +488,163 @@ function renderVerdict(v) {
        ${v.applied_steps && v.applied_steps.length ? "<div class='muted' style='margin-top:8px'>Applied:</div>" + list(v.applied_steps) : ""}
        ${v.recommended_manual_steps && v.recommended_manual_steps.length ? "<div class='muted' style='margin-top:8px'>Recommended manual steps:</div>" + list(v.recommended_manual_steps) : ""}
      </div>`;
+}
+
+// ----------------------------------------------------------------------------
+// Closed-loop seed optimization: Claude tries seeds, scores each for surface
+// coverage and floating stitches, then we render the winning pattern.
+// ----------------------------------------------------------------------------
+let optimizeSource = null;
+
+function clearOptimizeOverlay() {
+  while (optOverlay.children.length) {
+    const c = optOverlay.children.pop();
+    c.geometry?.dispose();
+    c.material?.dispose();
+  }
+}
+
+function showOptimizeCulprits(metrics) {
+  clearOptimizeOverlay();
+  if (!metrics) return;
+  // uncovered face centroids → red dots
+  const uc = metrics.uncovered_centroids || [];
+  if (uc.length) {
+    const pos = [];
+    for (const p of uc) pos.push(p[0], p[1], p[2]);
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    optOverlay.add(new THREE.Points(g, new THREE.PointsMaterial({
+      color: 0xff3b3b, size: markerSize() * 2.4, sizeAttenuation: true,
+    })));
+  }
+  // floating-edge midpoints → yellow dots
+  const fl = metrics.floating_edges || [];
+  if (fl.length) {
+    const pos = [];
+    for (const e of fl) pos.push(e.midpoint[0], e.midpoint[1], e.midpoint[2]);
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    optOverlay.add(new THREE.Points(g, new THREE.PointsMaterial({
+      color: 0xffd23b, size: markerSize() * 2.4, sizeAttenuation: true,
+    })));
+  }
+}
+
+function renderSeedChoice(choice, metrics) {
+  const m = metrics || {};
+  const pct = (x) => (x == null ? "?" : (x * 100).toFixed(1) + "%");
+  els.agentVerdict.innerHTML =
+    `<div class="card">
+       <h4><span class="verdict-badge v-yes">best seed #${esc(choice.seed)}</span>
+           <span class="muted">· score ${esc((choice.score ?? 0).toFixed(3))}</span></h4>
+       <div>${esc(choice.summary || "")}</div>
+       <div class="muted" style="margin-top:8px">
+         coverage ${pct(m.coverage)} · floating stitches ${esc(m.n_floating ?? "?")}
+         · thin segments ${esc(m.n_thin_segments ?? "?")}</div>
+       ${choice.reasons && choice.reasons.length
+         ? "<div class='muted' style='margin-top:8px'>Reasons:</div><ul>"
+           + choice.reasons.map((r) => `<li>${esc(r)}</li>`).join("") + "</ul>"
+         : ""}
+     </div>`;
+}
+
+async function runAuto() {
+  if (!state.meshId) return;
+  els.run.disabled = true;
+  els.assess.disabled = true;
+  els.panelTitle.textContent = "Auto-seed";
+  els.pattern.style.display = "none";
+  els.agent.style.display = "block";
+  setDrawer(true);
+  els.agentLog.innerHTML = "";
+  els.agentApprove.innerHTML = "";
+  els.agentVerdict.innerHTML = "";
+  clearOptimizeOverlay();
+  setStatus("Optimizing the seed with Claude Opus 4.8…");
+  try {
+    const res = await fetch("/api/optimize", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: state.meshId, stitch_width: Number(els.sw.value) }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    startOptimizeStream((await res.json()).session_id);
+  } catch (e) {
+    setStatus("Error: " + e.message);
+    els.assess.disabled = false;
+    refreshSeedMode();
+  }
+}
+
+function startOptimizeStream(sid) {
+  optimizeSource = new EventSource(`/api/optimize/${sid}/stream`);
+  optimizeSource.onmessage = (msg) => {
+    const ev = JSON.parse(msg.data);
+    switch (ev.type) {
+      case "thinking": logText(ev.text, "think"); break;
+      case "text": logText(ev.text, "text"); break;
+      case "tool_call":
+        logLine(`→ <span class="tool">${esc(ev.name)}</span>` +
+          (ev.name === "evaluate_seed" ? ` <em>seed ${esc(ev.input.seed)}</em>` : ""));
+        break;
+      case "tool_result":
+        logLine(`&nbsp;&nbsp;✓ ${esc(ev.name)}${ev.is_error ? ' <span class="err">[error]</span>' : ""}`);
+        break;
+      case "seed_eval": {
+        const s = ev.summary || {};
+        if (s.ran) {
+          logLine(`&nbsp;&nbsp;<span class="seed-score">seed ${esc(s.seed)} → score `
+            + `<b>${esc(s.score)}</b>, coverage ${esc((s.coverage * 100).toFixed(1))}%, `
+            + `floating ${esc(s.n_floating)}, segments ${esc(s.n_segments)}</span>`, "applied");
+        } else {
+          logLine(`&nbsp;&nbsp;<span class="err">seed ${esc(s.seed)} → failed`
+            + (s.error ? `: ${esc(s.error)}` : "") + `</span>`);
+        }
+        break;
+      }
+      case "seed_choice":
+        renderSeedChoice(ev.choice, ev.metrics);
+        applySeedChoice(ev.choice, ev.metrics);
+        break;
+      case "error": logLine(`⚠ ${esc(ev.message)}`, "err"); break;
+      case "end":
+        optimizeSource.close();
+        els.assess.disabled = false;
+        refreshSeedMode();
+        break;
+    }
+  };
+  optimizeSource.onerror = () => {
+    optimizeSource.close();
+    els.assess.disabled = false;
+    refreshSeedMode();
+    setStatus("Optimization stream closed.");
+  };
+}
+
+// Adopt the winning seed, generate its pattern, and overlay the culprits.
+async function applySeedChoice(choice, metrics) {
+  state.seed = Number(choice.seed);
+  setStatus(`Best seed #${state.seed} — generating its pattern…`);
+  try {
+    const res = await fetch("/api/run", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: state.meshId, seed: state.seed, stitch_width: Number(els.sw.value),
+      }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    const data = await res.json();
+    renderResult(data);
+    showOptimizeCulprits(metrics);
+    placeSeedMarker(state.seed);
+    els.pattern.textContent = data.pattern;
+    const nRows = data.segments.reduce((s, seg) => s + seg.rows.length, 0);
+    setStatus(`Auto-seed #${state.seed}: ${data.segments.length} segment(s), `
+      + `${nRows} rows. Red = uncovered, yellow = floating stitches.`);
+  } catch (e) {
+    setStatus("Error generating pattern: " + e.message);
+  }
 }
 
 function addLoadSimplified(mesh) {
