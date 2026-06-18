@@ -99,12 +99,19 @@
       display: flex; flex-direction: column; background: var(--panel);
       border-right: 1px solid var(--border); box-shadow: 4px 0 18px rgba(0,0,0,.35);
       transform: translateX(-100%); transition: transform .25s ease; z-index: 20; }
-    #drawer.open { transform: translateX(0); }
+    #drawer.open { transform: translateX(0); visibility: visible; }
+    /* The closed drawer is tucked to the left where it would otherwise overlay the
+       sidebar — keep it (and the pattern panel) hidden until it's actually opened,
+       so it's only ever in the way once there's generated content on show. */
+    #drawer:not(.open) { visibility: hidden; }
     #drawer-tab { position: absolute; right: -34px; top: 50%; transform: translateY(-50%);
       width: 34px; padding: 14px 0; border: 1px solid var(--border); border-left: none;
       border-radius: 0 8px 8px 0; background: var(--panel); color: var(--accent);
-      font-size: 13px; font-weight: 700; cursor: pointer; display: flex; align-items: center;
+      font-size: 13px; font-weight: 700; cursor: pointer; display: none; align-items: center;
       gap: 6px; writing-mode: vertical-rl; }
+    /* the handle only appears once the drawer has generated content to show;
+       visibility:visible re-shows it even while the closed drawer body is hidden */
+    #drawer.armed #drawer-tab { display: flex; visibility: visible; }
     #drawer-tab span { writing-mode: vertical-rl; letter-spacing: 2px; font-size: 10px; color: var(--muted); }
     #drawer.open #drawer-tab { color: var(--accent); }
     .ptitle { padding: 12px 18px; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); }

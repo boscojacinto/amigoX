@@ -207,8 +207,11 @@ canvas.addEventListener("pointerup", (ev) => {
 // ----------------------------------------------------------------------------
 function setStatus(msg) { els.status.textContent = msg || ""; }
 
-// Left slide-out drawer holding the pattern / agent panel.
+// Left slide-out drawer holding the pattern / agent panel. The drawer (and its
+// reopen handle) stays unavailable until there is generated content to show —
+// opening it programmatically "arms" the handle so it can be reopened after close.
 function setDrawer(open) {
+  if (open) els.drawer.classList.add("armed");
   els.drawer.classList.toggle("open", open);
   els.drawerTab.firstChild.nodeValue = open ? "◂" : "▸";
 }
@@ -235,6 +238,9 @@ function loadMeshPayload(data) {
   els.run.disabled = true;
   els.assess.disabled = false;
   els.editToggle.disabled = false;
+  // a fresh mesh has no pattern yet — hide the drawer and its handle until generated
+  setDrawer(false);
+  els.drawer.classList.remove("armed");
   editor?.onMeshLoaded();
 }
 
