@@ -24,6 +24,10 @@
       width: 340px; min-width: 340px; height: 100%;
       background: var(--panel); border-right: 1px solid var(--border);
       display: flex; flex-direction: column;
+      /* Sit above the closed drawer so it tucks out of sight behind this panel
+         (the drawer's container starts to the right of the sidebar, so its
+         closed translateX(-100%) parks it over the sidebar otherwise). */
+      position: relative; z-index: 30;
     }
     #sidebar header { padding: 18px 20px 12px; border-bottom: 1px solid var(--border); }
     #sidebar header h1 { margin: 0; font-size: 20px; letter-spacing: .5px; }
@@ -148,6 +152,11 @@
           <label class="auto-toggle disabled"><input type="checkbox" id="auto-seed" disabled /> Auto-pick seed &amp; width (Claude optimizes) 🎯</label>
           <span class="seed-pill" id="seed-pill">click the mesh to pick</span>
           <div class="hint" id="seed-hint">Click a point on the mesh — crocheting starts here (the magic circle).</div>
+          <label class="auto-toggle disabled" style="margin-top:6px"><input type="checkbox" id="roi-brush" disabled /> Brush problem areas 🖌
+            <button id="roi-clear" class="ep-mini" disabled title="Clear the brushed region">Clear</button>
+          </label>
+          <div class="hint" id="roi-hint">Drag on the mesh to paint a thin/bare feature, then re-lay it locally (finer rows + its own spiral). Needs a seed (pick one or auto-generate first).</div>
+          <button id="roi-relay" class="secondary" disabled style="margin-top:6px" title="Densify the brushed segment(s) and give a merged protrusion its own spiral">Re-lay brushed area ✶</button>
         </div>
         <div class="row">
           <label>3 · Stitch width — <span class="value" id="sw-val">0.050</span>
@@ -177,6 +186,7 @@
         <div class="ptitle">
           <span id="panel-title">Pattern</span>
           <span style="display:flex; gap:8px; align-items:center;">
+            <button class="copy-btn" id="panel-toggle" style="display:none" title="Switch between the pattern and the optimizer log">Log</button>
             <button class="copy-btn" id="copy" style="display:none">Copy</button>
             <button class="copy-btn" id="drawer-close">✕</button>
           </span>
@@ -212,6 +222,6 @@
     }
   }
   </script>
-  <script type="module" src="/static/app.js?v=11"></script>
+  <script type="module" src="/static/app.js?v=14"></script>
 </body>
 </html>

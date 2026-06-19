@@ -124,6 +124,88 @@ async def run(req: RunRequest):
 
 
 # ----------------------------------------------------------------------------
+# Brush-driven local re-layout: densify + force-segment the painted region
+# ----------------------------------------------------------------------------
+class RelayoutRequest(BaseModel):
+    id: str
+    seed: int = 0
+    stitch_width: float = 0.05
+    roi_vertices: list[int] = []
+    densify: bool = True
+    force_segment: bool = True
+    densify_factor: float = 0.5
+
+
+@app.post("/api/relayout")
+async def relayout(req: RelayoutRequest):
+    """
+    Re-lay stitches over a brushed region with the two *local* levers: finer
+    per-segment sampling (densify) and an injected cut so a merged protrusion
+    becomes its own spiral (force_segment). Returns the same render payload as
+    /api/run plus before/after quality metrics for the brushed region.
+    """
+    mesh = _MESHES.get(req.id)
+    if mesh is None:
+        raise HTTPException(status_code=404, detail="Mesh not found — upload it first.")
+    V, F = mesh["V"], mesh["F"]
+    if not (0 <= req.seed < len(V)):
+        raise HTTPException(status_code=400, detail="Seed index out of range.")
+    if req.stitch_width <= 0:
+        raise HTTPException(status_code=400, detail="Stitch width must be positive.")
+    n = len(V)
+    roi = [int(i) for i in req.roi_vertices if 0 <= int(i) < n]
+    if not roi:
+        raise HTTPException(status_code=400, detail="Brush a region first.")
+
+    from amigo.quality import evaluate_pattern, _stitch_points
+    from scipy.spatial import cKDTree
+
+    # Count the stitches that actually sit on the brushed faces — the most direct
+    # measure of densification (a generous coverage radius hides it, since a
+    # protrusion can read as "covered" by nearby body stitches without its own).
+    Va, Fa = np.asarray(V, float), np.asarray(F, np.int64)
+    roi_mask = np.isin(Fa, roi).any(axis=1)
+    roi_cent = Va[Fa[roi_mask]].mean(axis=1) if roi_mask.any() else np.empty((0, 3))
+
+    def roi_stitches(data):
+        pts = _stitch_points(data)
+        if len(pts) == 0 or len(roi_cent) == 0:
+            return 0
+        d = cKDTree(roi_cent).query(pts)[0]
+        return int((d <= req.stitch_width).sum())
+
+    try:
+        before = amigo_pipeline_data(V, F, seed_idx=req.seed,
+                                     stitch_width=req.stitch_width, verbose=False)
+        result = amigo_pipeline_data(
+            V, F, seed_idx=req.seed, stitch_width=req.stitch_width, verbose=False,
+            roi_vertices=roi,
+            densify_factor=(req.densify_factor if req.densify else None),
+            force_segment=req.force_segment,
+        )
+        # Default-radius metrics drive the culprit dots (consistent with the app).
+        m_after = evaluate_pattern(V, F, result, req.stitch_width, roi_vertices=roi)
+        # Strict-radius roi_coverage = real stitch presence on the brushed feature.
+        sb = evaluate_pattern(V, F, before, req.stitch_width, roi_vertices=roi,
+                              cover_radius_factor=0.6)
+        sa = evaluate_pattern(V, F, result, req.stitch_width, roi_vertices=roi,
+                              cover_radius_factor=0.6)
+    except Exception as exc:  # noqa: BLE001
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Relayout error: {exc}")
+
+    result.pop("instructions", None)
+    result["metrics"] = m_after
+    result["roi_before"] = {"roi_coverage": sb.get("roi_coverage"),
+                            "roi_stitches": roi_stitches(before),
+                            "n_segments": sb.get("n_segments")}
+    result["roi_after"] = {"roi_coverage": sa.get("roi_coverage"),
+                           "roi_stitches": roi_stitches(result),
+                           "n_segments": sa.get("n_segments")}
+    return result
+
+
+# ----------------------------------------------------------------------------
 # Crochetability agent (Phase 2)
 # ----------------------------------------------------------------------------
 class AssessRequest(BaseModel):
@@ -208,9 +290,10 @@ async def assess_decision(sid: str, req: DecisionRequest):
 class OptimizeRequest(BaseModel):
     id: str
     stitch_width: float = 0.05
+    roi_vertices: list[int] = []
 
 
-def _run_optimize_session(sid: str, V, F, stitch_width: float):
+def _run_optimize_session(sid: str, V, F, stitch_width: float, roi_vertices):
     """Background thread: drive the seed optimizer, bridging events to the queue."""
     from amigo import run_seed_optimization
 
@@ -222,7 +305,8 @@ def _run_optimize_session(sid: str, V, F, stitch_width: float):
         sess["events"].put(ev)
 
     try:
-        run_seed_optimization(state, emit=emit, stitch_width=stitch_width)
+        run_seed_optimization(state, emit=emit, stitch_width=stitch_width,
+                              roi_vertices=roi_vertices or None)
     except Exception as exc:  # noqa: BLE001
         traceback.print_exc()
         sess["events"].put({"type": "error", "message": str(exc)})
@@ -236,11 +320,13 @@ async def optimize_start(req: OptimizeRequest):
         raise HTTPException(status_code=404, detail="Mesh not found — upload it first.")
     if req.stitch_width <= 0:
         raise HTTPException(status_code=400, detail="Stitch width must be positive.")
+    n_verts = len(mesh["V"])
+    roi = [int(i) for i in req.roi_vertices if 0 <= int(i) < n_verts]
     sid = uuid.uuid4().hex
     _SESSIONS[sid] = {"events": queue.Queue(), "decisions": queue.Queue()}
     threading.Thread(
         target=_run_optimize_session,
-        args=(sid, mesh["V"], mesh["F"], req.stitch_width),
+        args=(sid, mesh["V"], mesh["F"], req.stitch_width, roi),
         daemon=True).start()
     return {"session_id": sid}
 

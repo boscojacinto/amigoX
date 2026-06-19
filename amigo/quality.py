@@ -86,9 +86,25 @@ def _thin_segment_count(data: dict) -> int:
     return thin
 
 
+def _roi_face_mask(F: np.ndarray, roi_vertices) -> np.ndarray | None:
+    """
+    Boolean mask over faces: True for faces touching any brushed (ROI) vertex.
+
+    Returns ``None`` when there is no ROI, so callers can take the (regression-
+    safe) uniform-weight path that reproduces the pre-ROI behaviour exactly.
+    """
+    if roi_vertices is None:
+        return None
+    roi = np.unique(np.asarray(list(roi_vertices), dtype=np.int64))
+    if roi.size == 0:
+        return None
+    return np.isin(F, roi).any(axis=1)
+
+
 def evaluate_pattern(V, F, data: dict, stitch_width: float, *,
                      cover_radius_factor: float = COVER_RADIUS_FACTOR,
-                     float_factor: float = FLOAT_FACTOR) -> dict:
+                     float_factor: float = FLOAT_FACTOR,
+                     roi_vertices=None, roi_weight: float = 4.0) -> dict:
     """
     Score a generated pattern against the mesh it came from.
 
@@ -97,9 +113,18 @@ def evaluate_pattern(V, F, data: dict, stitch_width: float, *,
     V, F          : the *normalized* mesh (same arrays passed to the pipeline).
     data          : the dict returned by ``amigo_pipeline_data``.
     stitch_width  : the stitch width used to generate ``data``.
+    roi_vertices  : optional iterable of mesh vertex indices the user brushed as a
+                    region of interest. Faces touching these vertices (and the
+                    edges that sit on them) are weighted ``roi_weight``x in the
+                    coverage and floating sub-scores, so leaving the brushed area
+                    bare or floating hurts the score much more — steering the
+                    optimizer to cover it. ``None``/empty ⇒ uniform weighting,
+                    identical to the pre-ROI behaviour. Indices are invariant under
+                    ``normalize_to_unit_area`` so they stay valid post-normalize.
 
     Returns a dict with the scalar ``score`` plus the sub-metrics and the
-    culprit ids/positions (capped) for highlighting.
+    culprit ids/positions (capped) for highlighting. When an ROI is supplied the
+    unweighted coverage *within* the ROI is also reported as ``roi_coverage``.
     """
     V = np.asarray(V, dtype=float)
     F = np.asarray(F, dtype=np.int64)
@@ -109,6 +134,8 @@ def evaluate_pattern(V, F, data: dict, stitch_width: float, *,
     n_saddles = len(data.get("saddles", []))
     n_thin = _thin_segment_count(data)
     thin_fraction = n_thin / n_segments if n_segments else 1.0
+
+    roi_mask = _roi_face_mask(F, roi_vertices)
 
     # ---- Coverage: which faces are within reach of a stitch? ------------------
     areas = face_areas(V, F)
@@ -123,6 +150,7 @@ def evaluate_pattern(V, F, data: dict, stitch_width: float, *,
             "n_segments": n_segments, "n_thin_segments": n_thin,
             "n_saddles": n_saddles, "median_edge_length": 0.0,
             "n_stitches": int(len(pts)),
+            "roi_coverage": 0.0 if roi_mask is not None else None,
         }
 
     centroids = V[F].mean(axis=1)
@@ -130,7 +158,19 @@ def evaluate_pattern(V, F, data: dict, stitch_width: float, *,
     dist, _ = tree.query(centroids)
     cover_radius = cover_radius_factor * stitch_width
     covered = dist <= cover_radius
-    coverage = float(areas[covered].sum() / total_area)
+
+    # Per-face weight: ROI faces count roi_weight x in coverage + floating.
+    fw = np.ones(len(F), dtype=float)
+    if roi_mask is not None:
+        fw[roi_mask] = roi_weight
+    w_area = fw * areas
+    coverage = float(w_area[covered].sum() / w_area.sum())
+    # Unweighted coverage restricted to the brushed faces — the feedback signal.
+    roi_coverage = None
+    if roi_mask is not None:
+        roi_total = float(areas[roi_mask].sum())
+        roi_coverage = (float(areas[roi_mask & covered].sum() / roi_total)
+                        if roi_total > 0 else 1.0)
     uncovered_ids = np.nonzero(~covered)[0]
     # Report the worst (farthest-from-any-stitch) uncovered faces first.
     order = uncovered_ids[np.argsort(-dist[uncovered_ids])][:_MAX_REPORT]
@@ -145,9 +185,17 @@ def evaluate_pattern(V, F, data: dict, stitch_width: float, *,
     median_len = float(np.median(lengths)) if len(lengths) else 0.0
     threshold = float_factor * max(stitch_width, median_len)
     float_mask = lengths > threshold
+    # Weight each edge by the ROI weight of the face nearest its midpoint, so
+    # floating stitches over the brushed region dominate the floating fraction.
+    if roi_mask is not None and len(lengths):
+        near = cKDTree(centroids).query(mids)[1]
+        ew = fw[near]
+    else:
+        ew = np.ones(len(lengths), dtype=float)
     n_floating = int(float_mask.sum())
-    total_edges = int(len(lengths))
-    floating_fraction = n_floating / total_edges if total_edges else 0.0
+    w_float = float((ew * float_mask).sum())
+    w_total = float(ew.sum())
+    floating_fraction = w_float / w_total if w_total else 0.0
     float_idx = np.nonzero(float_mask)[0]
     float_idx = float_idx[np.argsort(-lengths[float_idx])][:_MAX_REPORT]
     floating_edges = [{"midpoint": mids[i].tolist(), "length": float(lengths[i])}
@@ -173,15 +221,19 @@ def evaluate_pattern(V, F, data: dict, stitch_width: float, *,
         "n_saddles": n_saddles,
         "median_edge_length": median_len,
         "n_stitches": int(len(pts)),
+        "roi_coverage": roi_coverage,
     }
 
 
-def evaluate_seed(V, F, seed_idx: int, stitch_width: float = 0.05) -> dict:
+def evaluate_seed(V, F, seed_idx: int, stitch_width: float = 0.05, *,
+                  roi_vertices=None) -> dict:
     """
     Normalize, run the pipeline at ``seed_idx``, and score the result.
 
     Robust to pipeline failure: returns ``{"ran": False, "score": 0.0, ...}``.
     The mesh is normalized internally so coverage compares like-with-like.
+    ``roi_vertices`` (brushed mesh-vertex indices) is forwarded to
+    ``evaluate_pattern`` to weight the region of interest.
     """
     Vn, _ = normalize_to_unit_area(np.asarray(V, dtype=float),
                                    np.asarray(F, dtype=np.int64))
@@ -192,7 +244,8 @@ def evaluate_seed(V, F, seed_idx: int, stitch_width: float = 0.05) -> dict:
         return {"ran": False, "score": 0.0, "seed": int(seed_idx),
                 "stitch_width": stitch_width,
                 "error": f"{type(exc).__name__}: {exc}"}
-    metrics = evaluate_pattern(Vn, F, data, stitch_width)
+    metrics = evaluate_pattern(Vn, F, data, stitch_width,
+                               roi_vertices=roi_vertices)
     metrics["seed"] = int(seed_idx)
     metrics["stitch_width"] = stitch_width
     return metrics
@@ -273,7 +326,7 @@ def summarize_metrics(m: dict) -> dict:
     if not m.get("ran", False):
         return {"ran": False, "seed": m.get("seed"),
                 "error": m.get("error", "pipeline failed")}
-    return {
+    out = {
         "ran": True,
         "seed": m.get("seed"),
         "stitch_width": m.get("stitch_width"),
@@ -287,3 +340,6 @@ def summarize_metrics(m: dict) -> dict:
         "n_thin_segments": m["n_thin_segments"],
         "n_saddles": m["n_saddles"],
     }
+    if m.get("roi_coverage") is not None:
+        out["roi_coverage"] = round(m["roi_coverage"], 4)
+    return out

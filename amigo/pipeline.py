@@ -110,6 +110,10 @@ def amigo_pipeline_data(
     seed_idx: int = 0,
     stitch_width: float = 0.05,
     verbose: bool = True,
+    *,
+    roi_vertices=None,
+    densify_factor: float | None = None,
+    force_segment: bool = False,
 ) -> dict:
     """
     Run the full AmiGo pipeline on already-loaded, already-normalised geometry
@@ -121,6 +125,16 @@ def amigo_pipeline_data(
     seed_idx      : vertex index to start crocheting from
     stitch_width  : stitch size in normalised units (~0.05 ≈ 20 rows)
     verbose       : print progress messages
+    roi_vertices  : optional iterable of *original-space* vertex indices the user
+                    brushed. Used by the two local levers below.
+    densify_factor: if set (e.g. 0.5), every segment that contains a brushed
+                    vertex is re-sampled at ``stitch_width * densify_factor`` — a
+                    finer width puts more real stitch rows exactly where painted.
+    force_segment : if True, inject a cut at the base of the brushed region so the
+                    protrusion above it (a snout, foot, limb the saddle pass
+                    merged into the body) becomes its own segment with a dedicated
+                    spiral. Composes with densify (the new segment is also brushed,
+                    so it densifies too).
 
     Returns
     -------
@@ -155,6 +169,14 @@ def amigo_pipeline_data(
     V, F = Vw, Fw
     seed_idx = int(old2new[seed_orig])
 
+    # Brushed region of interest, remapped into welded-vertex space.
+    roi_w: set[int] = set()
+    if roi_vertices is not None:
+        for i in roi_vertices:
+            i = int(i)
+            if 0 <= i < V_orig_n:
+                roi_w.add(int(old2new[i]))
+
     # ------------------------------------------------------------------
     # 2. Geodesic distance f
     # ------------------------------------------------------------------
@@ -166,6 +188,32 @@ def amigo_pipeline_data(
 
     f_max_idx = find_maximum(f)
     saddles = find_saddle_points(V, F, f)
+
+    # Force a segment: cut at the *neck* of each brushed protrusion so the part
+    # above it becomes its own segment. The brush may cover several disjoint
+    # protrusions (e.g. a snout and two feet at very different f-levels), so we
+    # split the brushed faces into connected components and inject one cut per
+    # component at its base (its lowest-f vertex — the neck). segment_by_saddles
+    # bands at each f-level and then splits each band into connected components,
+    # so only the brushed protrusion is isolated, not every region at that level.
+    if force_segment and roi_w:
+        from .segmentation import _face_components
+        brushed_faces = np.where(np.isin(F, list(roi_w)).any(axis=1))[0]
+        extra = set()
+        for comp in _face_components(F, brushed_faces):
+            comp_verts = np.unique(F[comp])
+            base = int(min(comp_verts, key=lambda v: float(f[v])))
+            # Skip cuts that coincide with the seed floor or the very tip — they
+            # don't carve out a protrusion.
+            if 1e-6 < float(f[base]) < float(f[f_max_idx]) - 1e-6:
+                extra.add(base)
+        new = extra - set(saddles)
+        if new:
+            saddles = sorted(set(saddles) | new, key=lambda s: float(f[s]))
+            if verbose:
+                print(f"  forced {len(new)} cut(s) at brushed protrusion necks: "
+                      f"{sorted((int(v), round(float(f[v]), 3)) for v in new)}")
+
     if verbose:
         print(f"  max-f vertex = {f_max_idx},  saddle count = {len(saddles)}")
 
@@ -184,6 +232,7 @@ def amigo_pipeline_data(
     #     loop; a leaf closes to a tip point.
     # ------------------------------------------------------------------
     seg_rows: dict[int, list] = {}
+    seg_densified: dict[int, bool] = {}
     for seg_idx in order:
         seg = seg_data[seg_idx]
         V_s, F_s = seg["V"], seg["F"]
@@ -191,6 +240,12 @@ def amigo_pipeline_data(
         f_s = f[lv]
         is_root = parent[seg_idx] < 0
         is_leaf = len(children[seg_idx]) == 0
+
+        # Local densification: a brushed segment gets a finer width → more rows.
+        seg_in_roi = bool(roi_w and roi_w.intersection(int(v) for v in lv))
+        seg_width = (stitch_width * densify_factor
+                     if (densify_factor and seg_in_roi) else stitch_width)
+        seg_densified[seg_idx] = bool(densify_factor and seg_in_roi)
 
         if is_root:
             local_seed = g2l.get(seed_idx, int(np.argmin(f_s)))
@@ -207,7 +262,7 @@ def amigo_pipeline_data(
             seam_verts = [local_seed, local_max]
 
         rows_pos, _ = sample_crochet_graph(
-            V_s, F_s, f_s, stitch_width=stitch_width,
+            V_s, F_s, f_s, stitch_width=seg_width,
             f_max_idx=local_max, seed_idx=local_seed, seam_vertices=seam_verts,
             cap_seed=is_root, cap_tip=is_leaf,
         )
@@ -264,6 +319,7 @@ def amigo_pipeline_data(
             "types": _stitch_types_per_vertex(rows_pos, seg_instr),
             "col_edges": [[[int(j), int(k)] for (j, k) in edges]
                           for edges in col_edges],
+            "densified": bool(seg_densified.get(seg_idx, False)),
         })
         all_instructions.extend(seg_instr)
 

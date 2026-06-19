@@ -412,7 +412,8 @@ def _run_tool(name, tool_input, state, emit, get_decision):
         V, F = state["current"]
         seed = int(tool_input["seed"])
         sw = float(tool_input.get("stitch_width", state.get("stitch_width", 0.05)))
-        m = _evaluate_seed(V, F, seed, sw)
+        m = _evaluate_seed(V, F, seed, sw,
+                           roi_vertices=state.get("roi_vertices"))
         # Key by (seed, width) so a later coarse re-eval doesn't clobber a fine one.
         state.setdefault("metrics", {})[_metrics_key(seed, sw)] = m
         summ = summarize_metrics(m)
@@ -520,20 +521,34 @@ def run_assessment(state, *, emit, get_decision, max_steps: int = 16):
 
 
 def run_seed_optimization(state, *, emit, get_decision=None,
-                          stitch_width: float = 0.05, max_steps: int = 10):
+                          stitch_width: float = 0.05, max_steps: int = 10,
+                          roi_vertices=None):
     """
     Closed-loop seed optimizer. The agent lists candidate seeds, evaluates the
     pattern each produces (coverage / floating stitches), iterates ~3-4 rounds,
     and submits the best seed via submit_seed_choice.
+
+    ``roi_vertices`` (optional) are mesh vertex indices the user brushed as a
+    region they especially want covered; they are forwarded to every
+    ``evaluate_seed`` call so the quality score weights that region.
 
     Returns the seed-choice dict (or None). The chosen seed's full quality
     metrics are stashed in ``state["metrics"][seed]`` for the UI to highlight.
     Requires ANTHROPIC_API_KEY (no mesh mutation, so no approval gate is used).
     """
     state["stitch_width"] = float(stitch_width)
+    state["roi_vertices"] = list(roi_vertices) if roi_vertices else None
     state.setdefault("metrics", {})
     if get_decision is None:
         get_decision = lambda proposal: {"approve": False, "note": ""}  # noqa: E731
+
+    roi_hint = ""
+    if state["roi_vertices"]:
+        roi_hint = (
+            " The user brushed a region of the surface they especially want "
+            "covered; its coverage and floating stitches are weighted more heavily "
+            "in the score and reported as roi_coverage — prioritize raising "
+            "roi_coverage while keeping the overall score high.")
 
     messages = [{
         "role": "user",
@@ -542,7 +557,7 @@ def run_seed_optimization(state, *, emit, get_decision=None,
             f"(a starting width of {stitch_width} is a hint — pick the width that "
             f"best fits the feature sizes). Start with get_diagnostics, "
             f"list_seed_candidates and suggest_stitch_width, then evaluate_seed a "
-            f"few (seed, width) pairs and iterate to the best."),
+            f"few (seed, width) pairs and iterate to the best." + roi_hint),
     }]
 
     def on_terminal(choice):
@@ -551,7 +566,8 @@ def run_seed_optimization(state, *, emit, get_decision=None,
         # Prefer the cached metrics for the exact chosen pair; recompute if absent.
         metrics = state.get("metrics", {}).get(_metrics_key(choice["seed"], sw))
         if metrics is None:
-            metrics = _evaluate_seed(V, F, int(choice["seed"]), sw)
+            metrics = _evaluate_seed(V, F, int(choice["seed"]), sw,
+                                     roi_vertices=state.get("roi_vertices"))
         emit({"type": "seed_choice", "choice": choice, "metrics": metrics})
 
     return _drive(messages, tools=_seed_tools(), system=SEED_SYSTEM_PROMPT,

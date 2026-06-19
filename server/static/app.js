@@ -18,6 +18,7 @@ const state = {
   seed: null,       // picked vertex index
   center: new THREE.Vector3(),
   radius: 1,
+  roiVertices: new Set(),  // brushed region-of-interest vertex indices
 };
 
 const els = {
@@ -28,11 +29,15 @@ const els = {
   run: document.getElementById("run"),
   assess: document.getElementById("assess"),
   autoSeed: document.getElementById("auto-seed"),
+  roiBrush: document.getElementById("roi-brush"),
+  roiClear: document.getElementById("roi-clear"),
+  roiRelay: document.getElementById("roi-relay"),
   editToggle: document.getElementById("edit-toggle"),
   seedPill: document.getElementById("seed-pill"),
   seedHint: document.getElementById("seed-hint"),
   pattern: document.getElementById("pattern"),
   panelTitle: document.getElementById("panel-title"),
+  panelToggle: document.getElementById("panel-toggle"),
   drawer: document.getElementById("drawer"),
   drawerTab: document.getElementById("drawer-tab"),
   drawerClose: document.getElementById("drawer-close"),
@@ -77,6 +82,8 @@ const overlay = new THREE.Group();   // stitch rows, saddles, markers
 scene.add(overlay);
 const optOverlay = new THREE.Group();  // optimizer culprits (uncovered / floating)
 scene.add(optOverlay);
+const roiOverlay = new THREE.Group();  // brushed region-of-interest (green)
+scene.add(roiOverlay);
 let seedMarker = null;
 
 const raycaster = new THREE.Raycaster();
@@ -186,7 +193,7 @@ let dragged = false;
 canvas.addEventListener("pointerdown", () => { dragged = false; });
 canvas.addEventListener("pointermove", () => { dragged = true; });
 canvas.addEventListener("pointerup", (ev) => {
-  if (dragged || !meshObj || els.autoSeed.checked) return;  // auto mode picks the seed
+  if (dragged || !meshObj || els.autoSeed.checked || els.roiBrush.checked) return;  // auto/brush mode
   const rect = canvas.getBoundingClientRect();
   pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
@@ -207,6 +214,126 @@ canvas.addEventListener("pointerup", (ev) => {
 });
 
 // ----------------------------------------------------------------------------
+// ROI brush — paint trouble spots; the auto-optimizer weights covering them.
+// Mirrors the editor's BVH-accelerated radius pick (edit.js installs the
+// accelerated raycast prototype at startup), but paints continuously on drag.
+// ----------------------------------------------------------------------------
+function roiBrushRadius2() {
+  const r = state.radius * 0.09;
+  return r * r;
+}
+
+function paintRoiAt(clientX, clientY) {
+  if (!meshObj) return;
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObject(meshObj, false);
+  if (!hits.length) return;
+  const hit = hits[0].point;
+  const r2 = roiBrushRadius2();
+  const before = state.roiVertices.size;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < state.nVerts; i++) {
+    v.set(state.vertices[i * 3], state.vertices[i * 3 + 1], state.vertices[i * 3 + 2]);
+    if (v.distanceToSquared(hit) <= r2) state.roiVertices.add(i);
+  }
+  if (state.roiVertices.size !== before) refreshRoiOverlay();
+}
+
+function refreshRoiOverlay() {
+  while (roiOverlay.children.length) {
+    const c = roiOverlay.children.pop();
+    c.geometry?.dispose();
+    c.material?.dispose();
+  }
+  els.roiClear.disabled = !state.roiVertices.size;
+  refreshRoiRelay();
+  if (!state.roiVertices.size || !state.vertices) return;
+  const pos = [];
+  for (const i of state.roiVertices)
+    pos.push(state.vertices[i * 3], state.vertices[i * 3 + 1], state.vertices[i * 3 + 2]);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  roiOverlay.add(new THREE.Points(g, new THREE.PointsMaterial({
+    color: 0x46e08a, size: markerSize() * 1.8, sizeAttenuation: true,
+  })));
+}
+
+let painting = false;
+canvas.addEventListener("pointerdown", (ev) => {
+  if (!els.roiBrush.checked || !meshObj || ev.button !== 0) return;
+  painting = true;
+  paintRoiAt(ev.clientX, ev.clientY);
+});
+canvas.addEventListener("pointermove", (ev) => {
+  if (painting) paintRoiAt(ev.clientX, ev.clientY);
+});
+window.addEventListener("pointerup", () => { painting = false; });
+
+els.roiBrush.addEventListener("change", () => {
+  // While brushing, drags paint instead of orbiting the camera.
+  controls.enabled = !els.roiBrush.checked;
+  els.roiClear.disabled = !state.roiVertices.size;
+  setStatus(els.roiBrush.checked
+    ? "Brush on — drag to paint trouble spots; toggle off to orbit."
+    : "");
+});
+
+els.roiClear.addEventListener("click", () => {
+  state.roiVertices.clear();
+  refreshRoiOverlay();
+  els.roiClear.disabled = true;
+});
+
+// The local re-lay needs a brushed region AND a seed (manually picked or chosen
+// by the auto-optimizer). It densifies the brushed segment(s) and gives a merged
+// protrusion its own spiral — the local levers that actually add stitches there.
+function refreshRoiRelay() {
+  els.roiRelay.disabled =
+    !(state.meshId && state.roiVertices.size && state.seed != null);
+}
+
+els.roiRelay.addEventListener("click", runRelayout);
+
+async function runRelayout() {
+  if (!state.meshId || state.seed == null || !state.roiVertices.size) return;
+  els.roiRelay.disabled = true;
+  els.panelToggle.style.display = "none";
+  showPanel("pattern");
+  setStatus("Re-laying brushed area (finer rows + its own spiral)…");
+  try {
+    const res = await fetch("/api/relayout", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: state.meshId, seed: state.seed,
+        stitch_width: Number(els.sw.value),
+        roi_vertices: [...state.roiVertices],
+        densify: true, force_segment: true,
+      }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    const data = await res.json();
+    renderResult(data);
+    showOptimizeCulprits(data.metrics);
+    placeSeedMarker(state.seed);
+    els.pattern.textContent = data.pattern;
+    els.copy.style.display = "inline-block";
+    setDrawer(true);
+    const b = data.roi_before || {}, a = data.roi_after || {};
+    const pct = (x) => (x == null ? "?" : (x * 100).toFixed(1) + "%");
+    setStatus(`Brushed area: ${b.roi_stitches ?? "?"} → ${a.roi_stitches ?? "?"} stitches · `
+      + `coverage ${pct(b.roi_coverage)} → ${pct(a.roi_coverage)} · `
+      + `segments ${b.n_segments ?? "?"} → ${a.n_segments ?? "?"}.`);
+  } catch (e) {
+    setStatus("Re-lay failed: " + e.message);
+  } finally {
+    refreshRoiRelay();
+  }
+}
+
+// ----------------------------------------------------------------------------
 // API
 // ----------------------------------------------------------------------------
 function setStatus(msg) { els.status.textContent = msg || ""; }
@@ -216,6 +343,18 @@ function setDrawer(open) {
   els.drawer.classList.toggle("open", open);
   els.drawerTab.firstChild.nodeValue = open ? "◂" : "▸";
 }
+
+// Flip the drawer between the generated pattern and the agent run log.
+function showPanel(which) {
+  const pat = which === "pattern";
+  els.pattern.style.display = pat ? "block" : "none";
+  els.agent.style.display = pat ? "none" : "block";
+  els.panelTitle.textContent = pat ? "Pattern" : "Auto-seed log";
+  els.copy.style.display = (pat && els.pattern.textContent.trim()) ? "inline-block" : "none";
+  els.panelToggle.textContent = pat ? "Log" : "Pattern";
+}
+els.panelToggle.addEventListener("click", () =>
+  showPanel(els.pattern.style.display === "none" ? "pattern" : "agent"));
 els.drawerTab.addEventListener("click", () =>
   setDrawer(!els.drawer.classList.contains("open")));
 els.drawerClose.addEventListener("click", () => setDrawer(false));
@@ -238,10 +377,20 @@ function loadMeshPayload(data) {
   els.assess.disabled = false;
   els.autoSeed.disabled = false;
   els.autoSeed.parentElement.classList.remove("disabled");
+  els.roiBrush.disabled = false;
+  els.roiBrush.parentElement.classList.remove("disabled");
   els.editToggle.disabled = false;
+  state.roiVertices.clear();
+  refreshRoiOverlay();
+  controls.enabled = !els.roiBrush.checked;
   clearOptimizeOverlay();
   refreshSeedMode();
   editor?.onMeshLoaded();
+  // The drawer holds the generated pattern — keep it closed until there is one.
+  setDrawer(false);
+  els.panelToggle.style.display = "none";
+  showPanel("pattern");
+  els.copy.style.display = "none";   // no real pattern yet
 }
 
 els.file.addEventListener("change", async () => {
@@ -288,6 +437,7 @@ function refreshSeedMode() {
   }
   // Manual "Auto" width needs a chosen seed; in auto mode the optimizer does it.
   els.autoWidth.disabled = auto || !(hasMesh && state.seed != null);
+  refreshRoiRelay();
 }
 
 // Set the stitch-width slider + label (clamped to the slider's range).
@@ -340,9 +490,8 @@ els.run.addEventListener("click", () => {
 
 async function runManual() {
   els.run.disabled = true;
-  els.agent.style.display = "none";
-  els.pattern.style.display = "block";
-  els.panelTitle.textContent = "Pattern";
+  els.panelToggle.style.display = "none";
+  showPanel("pattern");
   clearOptimizeOverlay();
   setStatus("Generating pattern… (geodesics, segmentation, sampling)");
   try {
@@ -575,7 +724,8 @@ function renderSeedChoice(choice, metrics) {
        <div>${esc(choice.summary || "")}</div>
        <div class="muted" style="margin-top:8px">
          coverage ${pct(m.coverage)} · floating stitches ${esc(m.n_floating ?? "?")}
-         · thin segments ${esc(m.n_thin_segments ?? "?")}</div>
+         · thin segments ${esc(m.n_thin_segments ?? "?")}${
+           m.roi_coverage != null ? ` · brushed area ${pct(m.roi_coverage)}` : ""}</div>
        ${choice.reasons && choice.reasons.length
          ? "<div class='muted' style='margin-top:8px'>Reasons:</div><ul>"
            + choice.reasons.map((r) => `<li>${esc(r)}</li>`).join("") + "</ul>"
@@ -590,6 +740,7 @@ async function runAuto() {
   els.panelTitle.textContent = "Auto-seed";
   els.pattern.style.display = "none";
   els.agent.style.display = "block";
+  els.panelToggle.style.display = "none";
   setDrawer(true);
   els.agentLog.innerHTML = "";
   els.agentApprove.innerHTML = "";
@@ -599,7 +750,10 @@ async function runAuto() {
   try {
     const res = await fetch("/api/optimize", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: state.meshId, stitch_width: Number(els.sw.value) }),
+      body: JSON.stringify({
+        id: state.meshId, stitch_width: Number(els.sw.value),
+        roi_vertices: [...state.roiVertices],
+      }),
     });
     if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
     startOptimizeStream((await res.json()).session_id);
@@ -627,9 +781,11 @@ function startOptimizeStream(sid) {
       case "seed_eval": {
         const s = ev.summary || {};
         if (s.ran) {
+          const roi = s.roi_coverage != null
+            ? `, brushed ${esc((s.roi_coverage * 100).toFixed(1))}%` : "";
           logLine(`&nbsp;&nbsp;<span class="seed-score">seed ${esc(s.seed)} @ w=${esc(s.stitch_width)} → score `
             + `<b>${esc(s.score)}</b>, coverage ${esc((s.coverage * 100).toFixed(1))}%, `
-            + `floating ${esc(s.n_floating)}, thin ${esc(s.n_thin_segments)}</span>`, "applied");
+            + `floating ${esc(s.n_floating)}, thin ${esc(s.n_thin_segments)}${roi}</span>`, "applied");
         } else {
           logLine(`&nbsp;&nbsp;<span class="err">seed ${esc(s.seed)} → failed`
             + (s.error ? `: ${esc(s.error)}` : "") + `</span>`);
@@ -659,6 +815,7 @@ function startOptimizeStream(sid) {
 // Adopt the winning seed + width, generate its pattern, and overlay the culprits.
 async function applySeedChoice(choice, metrics) {
   state.seed = Number(choice.seed);
+  refreshRoiRelay();
   const width = choice.stitch_width ? Number(choice.stitch_width) : Number(els.sw.value);
   if (choice.stitch_width) setStitchWidth(width);   // reflect the chosen width
   setStatus(`Best seed #${state.seed} @ width ${width} — generating its pattern…`);
@@ -675,6 +832,10 @@ async function applySeedChoice(choice, metrics) {
     showOptimizeCulprits(metrics);
     placeSeedMarker(state.seed);
     els.pattern.textContent = data.pattern;
+    // The agent log streamed live; now surface the final pattern (the deliverable).
+    // The Log ⇄ Pattern toggle lets the user flip back to review the run.
+    showPanel("pattern");
+    els.panelToggle.style.display = "inline-block";
     const nRows = data.segments.reduce((s, seg) => s + seg.rows.length, 0);
     setStatus(`Auto-seed #${state.seed}: ${data.segments.length} segment(s), `
       + `${nRows} rows. Red = uncovered, yellow = floating stitches.`);
