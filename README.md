@@ -79,6 +79,25 @@ click-to-pick workflow, where an **Auto** button beside the slider sizes the
 width to the current seed's narrowest feature. The CLI (`optimize.py`) shares the
 same agent core.
 
+**Phase 5 — brush problem areas (local re-lay).** A brushed spot is a *local*
+request, but seed and stitch width are *global* knobs — so re-optimizing them
+can't reliably add stitches to one thin feature (a snout, an ear, a heart's
+lobe). Instead you **paint the trouble area** on the mesh and **re-lay it
+locally** with two complementary levers:
+
+- **Densify** — the segment(s) you painted are re-sampled at a finer stitch
+  width, so more real stitch rows land exactly there.
+- **Force-segment** — a cut is injected at the *neck* of each brushed protrusion
+  (its lowest-field rim) so a feature the saddle pass merged into the body gets
+  its own dedicated spiral.
+
+Toggle **"Brush problem areas"**, drag over the feature, then **Re-lay brushed
+area** — it reports the before/after **stitch count**, brushed-area coverage, and
+segment count (e.g. a brushed heart lobe goes 24 → 66 stitches, 3 → 4 segments).
+The brushed region also weights the Phase-4 optimizer's score (`roi_coverage`),
+so an auto-pick run prioritises covering it. The pipeline accepts this directly:
+`amigo_pipeline_data(..., roi_vertices=, densify_factor=, force_segment=)`.
+
 ---
 
 ## Setup
@@ -128,12 +147,12 @@ amigo/
   simplify.py      global repair transforms
   localize.py      localized problem detectors (incl. tree-cotree handle loops)
   edit.py          mesh-edit ops (fill_loop, inflate, cut_handle, …)
-  quality.py       pattern scorer — coverage + floating-stitch metrics; auto stitch width
+  quality.py       pattern scorer — coverage + floating-stitch metrics (+ brushed-ROI weighting); auto stitch width
   seed_search.py   seed candidate generation (pole + geodesic FPS) + ranking
   agent.py         the agent (claude-opus-4-8): assess + seed optimization
 server/
-  app.py           FastAPI backend (pipeline, assess SSE, optimize SSE, localize/edit)
-  static/          three.js frontend (app.js viewer, edit.js editor)
+  app.py           FastAPI backend (pipeline, assess/optimize SSE, localize/edit, brush re-lay)
+  static/          three.js frontend (app.js viewer + brush, edit.js editor)
 main.py            CLI: mesh → pattern
 assess.py          CLI: assess + repair a mesh
 optimize.py        CLI: closed-loop best-seed search → pattern
